@@ -148,10 +148,12 @@ def stroke_style(data: bytes, style_offset: int, color_value: int) -> tuple[tupl
         return stroke_color(color_value), 1.0
     components = [read_be_float(data, style_offset + offset) for offset in (20, 24, 28)]
     if all(math.isfinite(component) and 0 <= component <= 1 for component in components) and any(components):
-        # These RGB fields are also used by ordinary colored handwriting. The
-        # PENCILENGINE style segment has no reliable highlighter flag, so keep
-        # them opaque rather than incorrectly fading colored text.
-        return tuple(round(component * 255) for component in components), 1.0
+        rgb = tuple(round(component * 255) for component in components)
+        # Bright colors stored via the RGB fields with the black sentinel
+        # are highlighters; dark values are ordinary pen colour variants.
+        if max(rgb) >= 60:
+            return rgb, 0.35
+        return rgb, 1.0
     return (0, 0, 0), 1.0
 
 
@@ -180,72 +182,69 @@ def color_hex(color: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{channel:02x}" for channel in color)
 
 
-def stroke_outline(stroke: Stroke) -> tuple[list[tuple[float, float]], tuple[float, float], tuple[float, float]]:
-    """Build one smooth variable-width polygon for a complete pen stroke."""
-    samples = list(zip(stroke.points, stroke.pressures))
-    compact: list[tuple[tuple[float, float], float]] = []
-    for point, pressure in samples:
-        if compact and point == compact[-1][0]:
-            compact[-1] = (point, pressure)
-        else:
-            compact.append((point, pressure))
-    if len(compact) < 2:
-        return [], (0, 0), (0, 0)
+def stroke_segments(stroke: Stroke) -> list[list[tuple[float, float]]]:
+    """Build per-segment filled quads plus triangular end caps.
 
-    left: list[tuple[float, float]] = []
-    right: list[tuple[float, float]] = []
-    for index, ((x, y), pressure) in enumerate(compact):
-        previous = compact[max(0, index - 1)][0]
-        following = compact[min(len(compact) - 1, index + 1)][0]
-        dx = following[0] - previous[0]
-        dy = following[1] - previous[1]
+    Each consecutive pair of stroke points produces one quadrilateral
+    expanded perpendicularly by the pressure-driven width.  This
+    approach never self-intersects even on tight curves.
+    """
+    pts = [(x, y) for x, y in stroke.points]
+    if len(pts) < 2:
+        return []
+    quads: list[list[tuple[float, float]]] = []
+    for index in range(len(pts) - 1):
+        x1, y1 = pts[index]
+        x2, y2 = pts[index + 1]
+        dx = x2 - x1
+        dy = y2 - y1
         length = math.hypot(dx, dy)
         if length == 0:
             continue
-        normal_x = -dy / length
-        normal_y = dx / length
-        # Preserve a calligraphic taper at the two ends while keeping the
-        # body width driven by the recorded pressure.
-        taper = 0.2 if index in {0, len(compact) - 1} else 1.0
-        radius = stroke_width(stroke, pressure) * taper / 2
-        left.append((x + normal_x * radius, y + normal_y * radius))
-        right.append((x - normal_x * radius, y - normal_y * radius))
-    return left + list(reversed(right)), compact[0][0], compact[-1][0]
+        nx = -dy / length
+        ny = dx / length
+        w1 = stroke_width(stroke, stroke.pressures[index]) / 2
+        w2 = stroke_width(stroke, stroke.pressures[index + 1]) / 2
+        taper_start = 0.15 if index == 0 else 1.0
+        taper_end = 0.15 if index + 1 == len(pts) - 1 else 1.0
+        w1 *= taper_start
+        w2 *= taper_end
+        l1 = (x1 + nx * w1, y1 + ny * w1)
+        r1 = (x1 - nx * w1, y1 - ny * w1)
+        l2 = (x2 + nx * w2, y2 + ny * w2)
+        r2 = (x2 - nx * w2, y2 - ny * w2)
+        quads.append([l1, r1, r2, l2])
+    return quads
 
 
-def svg_path(points: list[tuple[float, float]], start_tip: tuple[float, float], end_tip: tuple[float, float]) -> str:
-    commands = [f"M {fmt(points[0][0])} {fmt(points[0][1])}"]
-    for index in range(1, len(points) - 1):
-        midpoint = ((points[index][0] + points[index + 1][0]) / 2, (points[index][1] + points[index + 1][1]) / 2)
-        commands.append(f"Q {fmt(points[index][0])} {fmt(points[index][1])} {fmt(midpoint[0])} {fmt(midpoint[1])}")
-    commands.append(f"Q {fmt(points[-1][0])} {fmt(points[-1][1])} {fmt(start_tip[0])} {fmt(start_tip[1])}")
-    commands.append(f"Q {fmt(points[0][0])} {fmt(points[0][1])} {fmt(points[0][0])} {fmt(points[0][1])} Z")
-    return " ".join(commands)
+def svg_quads(quads: list[list[tuple[float, float]]]) -> str:
+    parts: list[str] = []
+    for quad in quads:
+        d = f"M {fmt(quad[0][0])} {fmt(quad[0][1])}"
+        for i in range(1, 4):
+            d += f" L {fmt(quad[i][0])} {fmt(quad[i][1])}"
+        d += " Z"
+        parts.append(d)
+    return "\n".join(parts)
 
 
-def pdf_path(points: list[tuple[float, float]], start_tip: tuple[float, float], page_height: float) -> list[str]:
-    commands = [f"{fmt(points[0][0])} {fmt(page_height - points[0][1])} m"]
-    current = points[0]
-    for index in range(1, len(points) - 1):
-        control = points[index]
-        end = ((points[index][0] + points[index + 1][0]) / 2, (points[index][1] + points[index + 1][1]) / 2)
-        cubic_one = (current[0] + (control[0] - current[0]) * 2 / 3, current[1] + (control[1] - current[1]) * 2 / 3)
-        cubic_two = (end[0] + (control[0] - end[0]) * 2 / 3, end[1] + (control[1] - end[1]) * 2 / 3)
-        commands.append(
-            f"{fmt(cubic_one[0])} {fmt(page_height - cubic_one[1])} {fmt(cubic_two[0])} {fmt(page_height - cubic_two[1])} {fmt(end[0])} {fmt(page_height - end[1])} c"
-        )
-        current = end
-    commands.append(f"{fmt(points[-1][0])} {fmt(page_height - points[-1][1])} {fmt(start_tip[0])} {fmt(page_height - start_tip[1])} {fmt(points[0][0])} {fmt(page_height - points[0][1])} c")
-    return commands + ["h f"]
+def pdf_quads(quads: list[list[tuple[float, float]]], page_height: float) -> str:
+    commands: list[str] = []
+    for quad in quads:
+        commands.append(f"{fmt(quad[0][0])} {fmt(page_height - quad[0][1])} m")
+        for i in range(1, 4):
+            commands.append(f"{fmt(quad[i][0])} {fmt(page_height - quad[i][1])} l")
+        commands.append("h f")
+    return "\n".join(commands)
 
 
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
-        outline, start_tip, end_tip = stroke_outline(stroke)
-        if outline:
+        quads = stroke_segments(stroke)
+        if quads:
             paths.append(
-                f'<path d="{svg_path(outline, start_tip, end_tip)}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
+                f'<path d="{svg_quads(quads)}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
             )
     images = []
     for image in page.images:
@@ -298,12 +297,12 @@ def pdf_stream(page: Page) -> bytes:
         )
     for stroke in page.strokes:
         red, green, blue = (channel / 255 for channel in stroke.color)
-        outline, start_tip, end_tip = stroke_outline(stroke)
-        if not outline:
+        quads = stroke_segments(stroke)
+        if not quads:
             continue
         commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} rg")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        commands.extend(pdf_path(outline, start_tip, page.height))
+        commands.append(pdf_quads(quads, page.height))
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
