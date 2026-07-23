@@ -96,12 +96,12 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
             point_offset = points_start + index * stride
             x = read_be_float(data, point_offset + 4)
             y = read_be_float(data, point_offset + 8)
-            pressure = read_be_float(data, point_offset + 28)
+            pressure = read_be_float(data, point_offset + 16)
             if not finite_coordinate(x) or not finite_coordinate(y):
                 points = []
                 break
             points.append((x, y))
-            pressures.append(pressure if math.isfinite(pressure) and pressure > 0 else 0.2)
+            pressures.append(pressure if math.isfinite(pressure) and pressure > 0 else 0.0)
         if len(points) < 2:
             continue
 
@@ -110,6 +110,15 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
         y_span = max(y for _, y in points) - min(y for _, y in points)
         if x_span == 0 and y_span == 0:
             continue
+        if any(pressures):
+            first_pressure = next(pressure for pressure in pressures if pressure > 0)
+            for index, pressure in enumerate(pressures):
+                if pressure == 0:
+                    pressures[index] = first_pressure
+                else:
+                    first_pressure = pressure
+        else:
+            pressures = [0.2] * len(points)
         base_width = read_be_float(data, offset - 20) if offset >= 20 else 1.0
         if not math.isfinite(base_width) or not 0 < base_width <= 100:
             base_width = 1.0
