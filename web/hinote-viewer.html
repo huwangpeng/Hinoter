@@ -91,12 +91,29 @@
     overflow: hidden; cursor: zoom-in; transition: transform .12s, box-shadow .12s;
   }
   .page-card:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,.09); }
-  .page-card .thumb { width: 100%; aspect-ratio: 1000 / 1414; background: #fff; }
+  /* 缩略图按页面真实宽高比渲染（横向页不再被拉伸为纵向） */
+  .page-card .thumb { width: 100%; aspect-ratio: var(--ar, 1000 / 1414); background: #fff; }
   .page-card .thumb svg { width: 100%; height: 100%; display: block; }
   .page-card .label {
     padding: 8px 12px; font-size: 12px; color: var(--muted);
     display: flex; justify-content: space-between; border-top: 1px solid var(--line);
   }
+  .page-card .label .ori { color: var(--accent); font-weight: 600; }
+
+  /* 横向（landscape）视图：水平滚动浏览横向笔记，页面按视口高度适配宽屏 */
+  body.landscape-mode #grid {
+    display: flex; flex-direction: row; flex-wrap: nowrap;
+    overflow-x: auto; overflow-y: hidden; gap: 18px;
+    margin-top: 18px; padding-bottom: 16px;
+    scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
+  }
+  body.landscape-mode #grid::-webkit-scrollbar { height: 10px; }
+  body.landscape-mode #grid::-webkit-scrollbar-thumb { background: #c3cbd6; border-radius: 99px; }
+  body.landscape-mode .page-card {
+    flex: 0 0 auto; width: auto; height: calc(100vh - 220px);
+    aspect-ratio: var(--ar, 1000 / 1414); scroll-snap-align: center;
+  }
+  body.landscape-mode .page-card .thumb { width: 100%; height: 100%; }
 
   /* Modal */
   #modal {
@@ -105,10 +122,14 @@
   }
   #modal.open { display: flex; }
   #modal .box {
-    background: #fff; border-radius: var(--radius); max-width: min(860px, 94vw);
+    background: #fff; border-radius: var(--radius); max-width: min(1100px, 94vw);
     max-height: 92vh; overflow: auto; padding: 14px;
   }
-  #modal .box svg { width: 100%; height: auto; display: block; }
+  /* 大图预览自适应视口：横向页按高度缩放、纵向页按宽度缩放，均保留比例 */
+  #modal .box svg {
+    display: block; margin: 0 auto; width: auto; height: auto;
+    max-width: 100%; max-height: 84vh;
+  }
   #modal .close {
     position: fixed; top: 18px; right: 26px; color: #fff; font-size: 30px; cursor: pointer; user-select: none;
   }
@@ -126,7 +147,7 @@
 
 <header>
   <h1>华为笔记 · hinote 矢量查看器</h1>
-  <p>纯本地解析 · 不上传任何数据 · 支持笔迹 / 文本 / 图片 / 背景网格</p>
+  <p>纯本地解析 · 不上传任何数据 · 支持笔迹 / 文本 / 图片 / 背景网格 · 横纵自适应</p>
 </header>
 
 <div class="container">
@@ -149,6 +170,7 @@
   <div id="toolbar">
     <div class="meta" id="metaText"></div>
     <div class="actions">
+      <button class="btn2" id="btnView" disabled>横向视图</button>
       <button class="btn2" id="btnSvg" disabled>下载全部 SVG (.zip)</button>
       <button class="btn2 primary" id="btnPdf" disabled>导出 PDF</button>
     </div>
@@ -449,7 +471,15 @@ function parseTextElement(el, width, height) {
 
 async function buildPage(pageData, files) {
   const ratio = pageData.pageRatio || 0.706;
-  const width = 1000.0, height = width / ratio;
+  // 笔迹坐标系水平宽度恒为 1000；横向时 height=1000*ratio（长边水平），
+  // 纵向时 height=1000/ratio。横向若取 width=1000/ratio 会让笔迹只占 70%≈2/3。
+  const width = 1000.0;
+  let height;
+  if (pageData.pageOrientation === 1) {
+    height = 1000.0 * ratio;   // 横向：长边水平 1000，垂直=1000*ratio
+  } else {
+    height = 1000.0 / ratio;   // 纵向：水平 1000，垂直=1000/ratio
+  }
   const images = [], texts = [];
   const els = (pageData.pageElement || []).slice().sort((a, b) => (a.positionZ || 0) - (b.positionZ || 0));
   for (const el of els) {
@@ -486,6 +516,7 @@ async function buildPage(pageData, files) {
     name: "page-" + (pageData.pageNumber || 0),
     number: pageData.pageNumber || 0,
     width, height,
+    isLandscape: width > height,
     background: pageColor(pageData.pageColor ?? -1),
     backgroundTemplate: pageData.background || "",
     strokes, images, texts,
@@ -873,6 +904,10 @@ async function processFile(file) {
     renderGrid();
     $("toolbar").style.display = "flex";
     $("metaText").innerHTML = `<b>${file.name}</b> · ${PAGES.length} 页 · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+    // 横向笔记应用：当多数页面为横向时自动进入横向滚动视图
+    const landCount = PAGES.filter(p => p.isLandscape).length;
+    setLandscapeMode(landCount > 0 && landCount >= PAGES.length - landCount);
+    $("btnView").disabled = false;
     $("btnSvg").disabled = false; $("btnPdf").disabled = false;
     await setProgress(100, `完成：${PAGES.length} 页已解析`);
     setTimeout(() => { $("progressWrap").style.display = "none"; }, 1200);
@@ -889,12 +924,25 @@ function renderGrid() {
   PAGES.forEach((page, i) => {
     const card = document.createElement("div");
     card.className = "page-card";
+    // 用页面真实宽高比驱动缩略图，避免横向页被拉伸成纵向
+    card.style.setProperty("--ar", `${page.width} / ${page.height}`);
+    const ori = page.isLandscape ? '<span class="ori">横向</span>' : "纵向";
     card.innerHTML = `<div class="thumb">${SVG_CACHE[i]}</div>
-      <div class="label"><span>第 ${page.number} 页</span><span>${page.strokes.length} 笔</span></div>`;
+      <div class="label"><span>第 ${page.number} 页 · ${ori}</span><span>${page.strokes.length} 笔</span></div>`;
     card.onclick = () => { $("modalBox").innerHTML = SVG_CACHE[i]; $("modal").classList.add("open"); };
     grid.appendChild(card);
   });
   grid.style.display = "grid";
+}
+
+/* 横向 / 网格视图切换 */
+let landscapeMode = false;
+function setLandscapeMode(on) {
+  landscapeMode = on;
+  document.body.classList.toggle("landscape-mode", on);
+  const btn = $("btnView");
+  btn.classList.toggle("primary", on);
+  btn.textContent = on ? "网格视图" : "横向视图";
 }
 
 /* 事件绑定 */
@@ -908,6 +956,7 @@ dz.ondrop = e => {
   const f = e.dataTransfer.files[0];
   if (f) processFile(f);
 };
+$("btnView").onclick = () => setLandscapeMode(!landscapeMode);
 $("modal").onclick = e => { if (e.target.id === "modal" || e.target.className === "close") $("modal").classList.remove("open"); };
 document.onkeydown = e => { if (e.key === "Escape") $("modal").classList.remove("open"); };
 

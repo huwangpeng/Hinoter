@@ -11,3 +11,5 @@ __pycache__/
 
 # WorkBuddy 工作内存
 .workbuddy/
+
+sample/

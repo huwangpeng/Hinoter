@@ -844,8 +844,14 @@ def source_name(path: str) -> str:
 
 def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
     ratio = page_data.get("pageRatio") or 0.706
+    # 笔迹坐标系的水平宽度恒为 1000；纵向时 height=1000/ratio（高>宽），
+    # 横向时 height=1000*ratio（宽>高，长边在水平方向）。
+    # 横向页若把 width 取 1000/ratio 会导致笔迹 x[0..1000] 只占 70%≈2/3。
     width = 1000.0
-    height = width / ratio
+    if page_data.get("pageOrientation") == 1:
+        height = 1000.0 * ratio   # 横向：长边=水平 1000，短边=垂直
+    else:
+        height = 1000.0 / ratio   # 纵向：长边=垂直 1414，短边=水平 1000
     images: list[ImageElement] = []
     texts: list[TextElement] = []
     for element in sorted(page_data.get("pageElement", []), key=lambda item: item.get("positionZ", 0)):
@@ -948,9 +954,12 @@ def export_archive(archive_path: Path, output_root: Path) -> Path:
 
     if pages:
         write_pdf(destination / f"{archive_path.stem}.pdf", pages)
+    land = sum(1 for p in pages if p.width > p.height)
     lines = [f"# {archive_path.name} 矢量导出", "", f"- 已导出完整页面：{len(pages)}"]
     if pages:
         lines.append(f"- PDF：`{archive_path.stem}.pdf`，{len(pages)} 页")
+        if land:
+            lines.append(f"- 横向（landscape）页面：{land} · 纵向（portrait）页面：{len(pages) - land}")
     if unsupported:
         lines.extend(["", "## 未导出笔迹", "", *[f"- {item}" for item in unsupported]])
     (destination / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -960,7 +969,7 @@ def export_archive(archive_path: Path, output_root: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archives", nargs="+", type=Path)
-    parser.add_argument("-o", "--output", type=Path, default=Path("vector-export"))
+    parser.add_argument("-o", "--output", type=Path, default=Path("out"))
     args = parser.parse_args()
     for archive in args.archives:
         print(export_archive(archive, args.output))
