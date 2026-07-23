@@ -43,6 +43,15 @@ class ImageElement:
 
 
 @dataclass
+class TextElement:
+    lines: list[tuple[str, int, int, int, float]]  # (text, r, g, b, font_size)
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+@dataclass
 class Page:
     name: str
     width: float
@@ -50,6 +59,7 @@ class Page:
     background: tuple[int, int, int]
     strokes: list[Stroke]
     images: list[ImageElement]
+    texts: list[TextElement]
 
 
 def finite_coordinate(value: float) -> bool:
@@ -152,10 +162,7 @@ def stroke_style(
         return stroke_color(color_value), 1.0
     components = [read_be_float(data, style_offset + offset) for offset in (20, 24, 28)]
     if all(math.isfinite(c) and 0 <= c <= 1 for c in components) and any(components):
-        if pen_type == 5:
-            rgb = (round(components[2] * 255), round(components[1] * 255), round(components[0] * 255))
-        else:
-            rgb = tuple(round(c * 255) for c in components)
+        rgb = tuple(round(c * 255) for c in components)
         if pen_type == 5:
             return rgb, softness if math.isfinite(softness) and 0 < softness <= 1 else 0.35
         if pen_type == 3 and math.isfinite(softness) and 0 < softness <= 1:
@@ -181,8 +188,7 @@ def fmt(value: float) -> str:
 
 
 def stroke_width(stroke: Stroke, pressure: float) -> float:
-    # The record stores normalized pressure and the enclosing pen record base nib.
-    return max(0.1, pressure * stroke.base_width)
+    return max(0.1, pressure * stroke.base_width * 0.8)
 
 
 def color_hex(color: tuple[int, int, int]) -> str:
@@ -267,6 +273,15 @@ def svg_document(title: str, page: Page) -> str:
             f'width="{fmt(image.width)}" height="{fmt(image.height)}"{transform}/>'
         )
     color = "#" + "".join(f"{channel:02x}" for channel in page.background)
+    text_els = []
+    for te in page.texts:
+        tspans = []
+        for i, (txt, r, g, b, fs) in enumerate(te.lines):
+            style = f"fill:rgb({r},{g},{b});font-size:{fmt(fs)}px"
+            x_str = fmt(te.x) if i == 0 else fmt(te.x + te.width * 0.02)
+            dy_str = fmt(fs * 1.2) if i > 0 else fmt(fs)
+            tspans.append(f'<tspan x="{x_str}" dy="{dy_str}" style="{style}">{html.escape(txt)}</tspan>')
+        text_els.append(f'<text xml:space="preserve">{chr(10).join(tspans)}</text>')
     return "\n".join(
         [
             '<?xml version="1.0" encoding="UTF-8"?>',
@@ -275,6 +290,7 @@ def svg_document(title: str, page: Page) -> str:
             f"<title>{html.escape(title)}</title>",
             f'<rect width="{fmt(page.width)}" height="{fmt(page.height)}" fill="{color}"/>',
             *images,
+            *text_els,
             *paths,
             "</svg>",
             "",
@@ -497,31 +513,55 @@ def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
     width = 1000.0
     height = width / ratio
     images: list[ImageElement] = []
+    texts: list[TextElement] = []
     for element in sorted(page_data.get("pageElement", []), key=lambda item: item.get("positionZ", 0)):
-        if element.get("elementType") != 1:
-            continue
-        data = files.get(source_name(element.get("filePath", "")))
-        if not data:
-            continue
-        if data.startswith(b"\xff\xd8\xff"):
-            mime_type = "image/jpeg"
-        elif data.startswith(b"\x89PNG\r\n\x1a\n"):
-            mime_type = "image/png"
-        else:
-            continue
-        element_width = element.get("width", 1) * width
-        element_height = element.get("height", 1) * height
-        images.append(
-            ImageElement(
-                data=data,
-                mime_type=mime_type,
+        if element.get("elementType") == 1:
+            data = files.get(source_name(element.get("filePath", "")))
+            if not data:
+                continue
+            if data.startswith(b"\xff\xd8\xff"):
+                mime_type = "image/jpeg"
+            elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+                mime_type = "image/png"
+            else:
+                continue
+            element_width = element.get("width", 1) * width
+            element_height = element.get("height", 1) * height
+            images.append(ImageElement(
+                data=data, mime_type=mime_type,
                 x=element.get("positionX", 0) * width,
                 y=element.get("positionY", 0) * height,
-                width=element_width,
-                height=element_height,
+                width=element_width, height=element_height,
                 angle=element.get("angle", 0),
-            )
-        )
+            ))
+        elif element.get("elementType") == 0:
+            html = element.get("html", "")
+            scale = element.get("scale", 1.0)
+            lines = []
+            import html as html_mod
+            import re
+            for line_html in html.split("<br>"):
+                m = re.search(r'<font color\s*=\s*"#([0-9a-fA-F]+)">.*?<hw_font size\s*=\s*"([^"]+)">(.*?)</hw_font>', line_html, re.DOTALL)
+                if not m:
+                    continue
+                color_hex_val = m.group(1)
+                font_size = float(m.group(2))
+                text = html_mod.unescape(re.sub(r'<[^>]+>', '', m.group(3)))
+                a_val = int(color_hex_val[:2], 16) if len(color_hex_val) >= 8 else 255
+                r_val = int(color_hex_val[2:4], 16) if len(color_hex_val) >= 6 else 0
+                g_val = int(color_hex_val[4:6], 16) if len(color_hex_val) >= 6 else 0
+                b_val = int(color_hex_val[6:8], 16) if len(color_hex_val) >= 6 else 0
+                if a_val < 128:
+                    continue
+                lines.append((text, r_val, g_val, b_val, font_size * scale))
+            if lines:
+                texts.append(TextElement(
+                    lines=lines,
+                    x=element.get("positionX", 0) * width,
+                    y=element.get("positionY", 0) * height,
+                    width=element.get("width", 1) * width,
+                    height=element.get("height", 1) * height,
+                ))
     strokes: list[Stroke] = []
     for attachment in page_data.get("attachment", []):
         data = files.get(source_name(attachment.get("filePath", "")))
@@ -534,6 +574,7 @@ def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
         background=page_color(page_data.get("pageColor", -1)),
         strokes=strokes,
         images=images,
+        texts=texts,
     )
 
 
