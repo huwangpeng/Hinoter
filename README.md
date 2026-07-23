@@ -10,12 +10,6 @@ hinoter/
 │   └── hinote_vector_export.py   # 核心导出脚本
 ├── web/
 │   └── hinote-viewer.html        # 纯本地网页查看器
-├── samples/                      # 笔记样本文件
-│   ├── 1.hinote                  # 25 页有界笔记（大样本）
-│   ├── 2.hinote                  # 4 页有界笔记
-│   ├── 有界.hinote               # 1 页有界笔记
-│   ├── 无边.hinote               # 无边画布笔记
-│   └── 页面样例.hinote           # 6 页背景模板示范
 ├── docs/                         # 格式文档
 │   ├── HINOTE_FORMAT.md          # 格式逆向文档
 │   └── 解析结果.md               # 初步解析记录
