@@ -183,37 +183,48 @@ def color_hex(color: tuple[int, int, int]) -> str:
 
 
 def stroke_segments(stroke: Stroke) -> list[list[tuple[float, float]]]:
-    """Build per-segment filled quads plus triangular end caps.
-
-    Each consecutive pair of stroke points produces one quadrilateral
-    expanded perpendicularly by the pressure-driven width.  This
-    approach never self-intersects even on tight curves.
-    """
-    pts = [(x, y) for x, y in stroke.points]
-    if len(pts) < 2:
+    samples = list(zip(stroke.points, stroke.pressures))
+    count = len(samples)
+    if count < 2:
         return []
-    quads: list[list[tuple[float, float]]] = []
-    for index in range(len(pts) - 1):
-        x1, y1 = pts[index]
-        x2, y2 = pts[index + 1]
-        dx = x2 - x1
-        dy = y2 - y1
+
+    # Smooth tangents from spatial neighbours so that shared quad
+    # vertices stay aligned even when the centreline changes direction.
+    tangents: list[tuple[float, float]] = []
+    for index in range(count):
+        if index == 0:
+            previous = samples[0][0]
+            following = samples[1][0]
+        elif index == count - 1:
+            previous = samples[-2][0]
+            following = samples[-1][0]
+        else:
+            previous = samples[index - 1][0]
+            following = samples[index + 1][0]
+        dx = following[0] - previous[0]
+        dy = following[1] - previous[1]
         length = math.hypot(dx, dy)
         if length == 0:
-            continue
-        nx = -dy / length
-        ny = dx / length
-        w1 = stroke_width(stroke, stroke.pressures[index]) / 2
-        w2 = stroke_width(stroke, stroke.pressures[index + 1]) / 2
-        taper_start = 0.15 if index == 0 else 1.0
-        taper_end = 0.15 if index + 1 == len(pts) - 1 else 1.0
-        w1 *= taper_start
-        w2 *= taper_end
-        l1 = (x1 + nx * w1, y1 + ny * w1)
-        r1 = (x1 - nx * w1, y1 - ny * w1)
-        l2 = (x2 + nx * w2, y2 + ny * w2)
-        r2 = (x2 - nx * w2, y2 - ny * w2)
-        quads.append([l1, r1, r2, l2])
+            tangents.append((1.0, 0.0))
+        else:
+            tangents.append((dx / length, dy / length))
+
+    # Offset along the smoothed normals.
+    left: list[tuple[float, float]] = []
+    right: list[tuple[float, float]] = []
+    for index in range(count):
+        tx, ty = tangents[index]
+        nx, ny = -ty, tx
+        radius = stroke_width(stroke, samples[index][1]) / 2
+        if index == 0 or index == count - 1:
+            radius *= 0.12
+        left.append((samples[index][0][0] + nx * radius, samples[index][0][1] + ny * radius))
+        right.append((samples[index][0][0] - nx * radius, samples[index][0][1] - ny * radius))
+
+    # Build one quadrilateral per consecutive pair of smooth vertices.
+    quads: list[list[tuple[float, float]]] = []
+    for index in range(count - 1):
+        quads.append([left[index], right[index], right[index + 1], left[index + 1]])
     return quads
 
 
