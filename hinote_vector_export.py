@@ -182,84 +182,61 @@ def color_hex(color: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{channel:02x}" for channel in color)
 
 
-def catmull_rom_bezier(
-    p0: tuple[float, float], p1: tuple[float, float],
-    p2: tuple[float, float], p3: tuple[float, float],
-) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
-    return (
-        p1,
-        (p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6),
-        (p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6),
-        p2,
-    )
-
-
-def smooth_chain(chain: list[tuple[float, float]]) -> str:
-    """Cubic-bezier SVG path through the given point chain (Catmull-Rom)."""
-    if not chain:
-        return ""
-    parts = [f"M {fmt(chain[0][0])} {fmt(chain[0][1])}"]
-    if len(chain) == 2:
-        parts.append(f"L {fmt(chain[1][0])} {fmt(chain[1][1])}")
-        return " ".join(parts)
-    cr = [chain[0], chain[0], *chain, chain[-1], chain[-1]]
-    for i in range(len(chain) - 1):
-        _, cp1, cp2, end = catmull_rom_bezier(cr[i], cr[i + 1], cr[i + 2], cr[i + 3])
-        parts.append(f"C {fmt(cp1[0])} {fmt(cp1[1])} {fmt(cp2[0])} {fmt(cp2[1])} {fmt(end[0])} {fmt(end[1])}")
-    return " ".join(parts)
-
-
-def smooth_chain_pdf(chain: list[tuple[float, float]], page_height: float) -> list[str]:
-    """Cubic-bezier PDF path through the given point chain."""
-    if not chain:
-        return []
-    commands = [f"{fmt(chain[0][0])} {fmt(page_height - chain[0][1])} m"]
-    if len(chain) == 2:
-        commands.append(f"{fmt(chain[1][0])} {fmt(page_height - chain[1][1])} l")
-        return commands
-    cr = [chain[0], chain[0], *chain, chain[-1], chain[-1]]
-    for i in range(len(chain) - 1):
-        _, cp1, cp2, end = catmull_rom_bezier(cr[i], cr[i + 1], cr[i + 2], cr[i + 3])
-        commands.append(
-            f"{fmt(cp1[0])} {fmt(page_height - cp1[1])} "
-            f"{fmt(cp2[0])} {fmt(page_height - cp2[1])} "
-            f"{fmt(end[0])} {fmt(page_height - end[1])} c"
-        )
-    return commands
-
-
-def stroke_outline_smooth(stroke: Stroke) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
-    """Offset points along smoothed normals; returns left and right chains."""
+def stroke_segments(stroke: Stroke) -> list[list[list[tuple[float, float]]]]:
     samples = list(zip(stroke.points, stroke.pressures))
-    count = len(samples)
-    if count < 2:
-        return [], []
+    n = len(samples)
+    if n < 2:
+        return []
     tangents: list[tuple[float, float]] = []
-    for idx in range(count):
-        if idx == 0:
-            prev = samples[0][0]
-            nxt = samples[1][0]
-        elif idx == count - 1:
-            prev = samples[-2][0]
-            nxt = samples[-1][0]
+    for i in range(n):
+        if i == 0:
+            dx = samples[1][0][0] - samples[0][0][0]
+            dy = samples[1][0][1] - samples[0][0][1]
+        elif i == n - 1:
+            dx = samples[n - 1][0][0] - samples[n - 2][0][0]
+            dy = samples[n - 1][0][1] - samples[n - 2][0][1]
         else:
-            prev = samples[idx - 1][0]
-            nxt = samples[idx + 1][0]
-        dx = nxt[0] - prev[0]
-        dy = nxt[1] - prev[1]
-        length = math.hypot(dx, dy)
-        tangents.append((dx / length, dy / length) if length else (1.0, 0.0))
+            dx = samples[i + 1][0][0] - samples[i - 1][0][0]
+            dy = samples[i + 1][0][1] - samples[i - 1][0][1]
+        L = math.hypot(dx, dy)
+        tangents.append((dx / L, dy / L) if L else (1.0, 0.0))
+
     left: list[tuple[float, float]] = []
     right: list[tuple[float, float]] = []
-    for idx in range(count):
-        tx, ty = tangents[idx]
+    cx: list[float] = []
+    cy: list[float] = []
+    rad: list[float] = []
+    for i in range(n):
+        tx, ty = tangents[i]
         nx, ny = -ty, tx
-        r = stroke_width(stroke, samples[idx][1]) / 2
-        if idx == 0 or idx == count - 1:
+        r = stroke_width(stroke, samples[i][1]) / 2
+        if i == 0 or i == n - 1:
             r *= 0.12
-        left.append((samples[idx][0][0] + nx * r, samples[idx][0][1] + ny * r))
-        right.append((samples[idx][0][0] - nx * r, samples[idx][0][1] - ny * r))
-    return left, right
+        x, y = samples[i][0]
+        left.append((x + nx * r, y + ny * r))
+        right.append((x - nx * r, y - ny * r))
+        cx.append(x)
+        cy.append(y)
+        rad.append(r)
+
+    segments: list[list[list[tuple[float, float]]]] = []
+    for i in range(n - 1):
+        # Start cap: left[i] → right[i] via semicircle around (cx[i],cy[i])
+        start_angle = math.atan2(left[i][1] - cy[i], left[i][0] - cx[i])
+        pts = []
+        steps = 8
+        for step in range(steps + 1):
+            a = start_angle + math.pi * step / steps
+            pts.append((cx[i] + rad[i] * math.cos(a), cy[i] + rad[i] * math.sin(a)))
+
+        # End cap: right[i + 1] → left[i + 1] via semicircle
+        end_angle = math.atan2(right[i + 1][1] - cy[i + 1], right[i + 1][0] - cx[i + 1])
+        for step in range(1, steps + 1):
+            a = end_angle + math.pi * step / steps
+            pts.append((cx[i + 1] + rad[i + 1] * math.cos(a), cy[i + 1] + rad[i + 1] * math.sin(a)))
+
+        segments.append(pts)
+    return segments
 
 
 
@@ -268,15 +245,15 @@ def stroke_outline_smooth(stroke: Stroke) -> tuple[list[tuple[float, float]], li
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
-        left, right = stroke_outline_smooth(stroke)
-        if not left or not right:
-            continue
-        d = smooth_chain(left)
-        d += " " + smooth_chain(list(reversed(right)))
-        d += " Z"
-        paths.append(
-            f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
-        )
+        segments = stroke_segments(stroke)
+        for seg in segments:
+            d = f"M {fmt(seg[0][0])} {fmt(seg[0][1])}"
+            for pt in seg[1:]:
+                d += f" L {fmt(pt[0])} {fmt(pt[1])}"
+            d += " Z"
+            paths.append(
+                f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
+            )
     images = []
     for image in page.images:
         encoded = base64.b64encode(image.data).decode("ascii")
@@ -328,15 +305,13 @@ def pdf_stream(page: Page) -> bytes:
         )
     for stroke in page.strokes:
         red, green, blue = (channel / 255 for channel in stroke.color)
-        left, right = stroke_outline_smooth(stroke)
-        if not left or not right:
-            continue
         commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} rg")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        parts = smooth_chain_pdf(left, page.height)
-        parts.extend(smooth_chain_pdf(list(reversed(right)), page.height))
-        parts.append("h f")
-        commands.extend(parts)
+        for seg in stroke_segments(stroke):
+            commands.append(f"{fmt(seg[0][0])} {fmt(page.height - seg[0][1])} m")
+            for pt in seg[1:]:
+                commands.append(f"{fmt(pt[0])} {fmt(page.height - pt[1])} l")
+            commands.append("h f")
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
