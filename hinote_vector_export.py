@@ -152,7 +152,10 @@ def stroke_style(
         return stroke_color(color_value), 1.0
     components = [read_be_float(data, style_offset + offset) for offset in (20, 24, 28)]
     if all(math.isfinite(c) and 0 <= c <= 1 for c in components) and any(components):
-        rgb = tuple(round(c * 255) for c in components)
+        if pen_type == 5:
+            rgb = (round(components[2] * 255), round(components[1] * 255), round(components[0] * 255))
+        else:
+            rgb = tuple(round(c * 255) for c in components)
         if pen_type == 5:
             return rgb, softness if math.isfinite(softness) and 0 < softness <= 1 else 0.35
         if pen_type == 3 and math.isfinite(softness) and 0 < softness <= 1:
@@ -214,8 +217,6 @@ def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
         tx, ty = tangents[i]
         nx, ny = -ty, tx
         r = stroke_width(stroke, samples[i][1]) / 2
-        if n > 4 and (i == 0 or i == n - 1):
-            r *= 0.12
         x, y = samples[i][0]
         left.append((x + nx * r, y + ny * r))
         right.append((x - nx * r, y - ny * r))
