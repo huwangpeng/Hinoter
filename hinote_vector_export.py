@@ -130,7 +130,9 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
         if not math.isfinite(base_width) or not 0 < base_width <= 100:
             base_width = 4.0
         color_value = read_be_uint(data, style_offset + 8)
-        color, opacity = stroke_style(data, style_offset, color_value)
+        pen_type = read_be_uint(data, style_offset + 12)
+        softness = read_be_float(data, style_offset + 32)  # float[8].
+        color, opacity = stroke_style(data, style_offset, color_value, pen_type, softness)
         strokes.append(Stroke(points, pressures, base_width, color, opacity))
     return strokes
 
@@ -143,16 +145,18 @@ def stroke_color(value: int) -> tuple[int, int, int]:
     return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
 
 
-def stroke_style(data: bytes, style_offset: int, color_value: int) -> tuple[tuple[int, int, int], float]:
+def stroke_style(
+    data: bytes, style_offset: int, color_value: int, pen_type: int, softness: float,
+) -> tuple[tuple[int, int, int], float]:
     if color_value not in {0, 0xFFFFFFFF}:
         return stroke_color(color_value), 1.0
     components = [read_be_float(data, style_offset + offset) for offset in (20, 24, 28)]
     if all(math.isfinite(component) and 0 <= component <= 1 for component in components) and any(components):
         rgb = tuple(round(component * 255) for component in components)
-        # Bright colors stored via the RGB fields with the black sentinel
-        # are highlighters; dark values are ordinary pen colour variants.
-        if max(rgb) >= 60:
-            return rgb, 0.35
+        if pen_type == 5:
+            return rgb, softness if math.isfinite(softness) and 0 < softness <= 1 else 0.35
+        if pen_type == 3 and math.isfinite(softness) and 0 < softness <= 1:
+            return rgb, softness
         return rgb, 1.0
     return (0, 0, 0), 1.0
 
