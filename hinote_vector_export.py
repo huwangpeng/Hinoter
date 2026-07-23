@@ -170,7 +170,7 @@ def fmt(value: float) -> str:
 
 def stroke_width(stroke: Stroke, pressure: float) -> float:
     # The record stores normalized pressure and the enclosing pen record base nib.
-    return max(0.25, pressure * stroke.base_width * 10)
+    return max(0.1, pressure * stroke.base_width)
 
 
 def color_hex(color: tuple[int, int, int]) -> str:

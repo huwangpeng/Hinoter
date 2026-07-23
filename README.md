@@ -38,6 +38,6 @@ python hinote_extract.py "无边.hinote" "有界.hinote" `
 python hinote_vector_export.py "有界.hinote" "无边.hinote"
 ```
 
-`PENCILENGINE` 笔迹会导出为 SVG `<path>`，并汇总为一个 PDF；两种输出都保持笔迹为矢量路径，缩放不会失真。导出严格按原始的“样式记录、点表、索引记录”笔画链解析，读取逐点压感、笔刷宽度、颜色和荧光笔透明度，并保留页面背景与 JPEG/PNG 元素。输出在 `vector-export/<文件名>/`。
+`PENCILENGINE` 笔迹会导出为 SVG `<path>`，并汇总为一个 PDF；两种输出都保持笔迹为矢量路径，缩放不会失真。导出严格按原始的“样式记录、点表、索引记录”笔画链解析，读取逐点压感、画布单位的笔刷宽度、颜色和荧光笔透明度，并保留页面背景与 JPEG/PNG 元素。输出在 `vector-export/<文件名>/`。
 
 无界笔记的 `PENKITINFENG` 分块笔迹与有界格式不同。工具会识别并报告这些块，但不会用缩略图替代为伪矢量内容。
