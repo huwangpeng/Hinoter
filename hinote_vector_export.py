@@ -177,14 +177,55 @@ def color_hex(color: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{channel:02x}" for channel in color)
 
 
+def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
+    """Build one smooth variable-width polygon for a complete pen stroke."""
+    samples = list(zip(stroke.points, stroke.pressures))
+    compact: list[tuple[tuple[float, float], float]] = []
+    for point, pressure in samples:
+        if compact and point == compact[-1][0]:
+            compact[-1] = (point, pressure)
+        else:
+            compact.append((point, pressure))
+    if len(compact) < 2:
+        return []
+
+    left: list[tuple[float, float]] = []
+    right: list[tuple[float, float]] = []
+    for index, ((x, y), pressure) in enumerate(compact):
+        previous = compact[max(0, index - 1)][0]
+        following = compact[min(len(compact) - 1, index + 1)][0]
+        dx = following[0] - previous[0]
+        dy = following[1] - previous[1]
+        length = math.hypot(dx, dy)
+        if length == 0:
+            continue
+        normal_x = -dy / length
+        normal_y = dx / length
+        radius = stroke_width(stroke, pressure) / 2
+        left.append((x + normal_x * radius, y + normal_y * radius))
+        right.append((x - normal_x * radius, y - normal_y * radius))
+    return left + list(reversed(right))
+
+
+def svg_path(points: list[tuple[float, float]]) -> str:
+    commands = [f"M {fmt(points[0][0])} {fmt(points[0][1])}"]
+    commands.extend(f"L {fmt(x)} {fmt(y)}" for x, y in points[1:])
+    return " ".join(commands) + " Z"
+
+
+def pdf_path(points: list[tuple[float, float]], page_height: float) -> list[str]:
+    commands = [f"{fmt(points[0][0])} {fmt(page_height - points[0][1])} m"]
+    commands.extend(f"{fmt(x)} {fmt(page_height - y)} l" for x, y in points[1:])
+    return commands + ["h f"]
+
+
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
-        for index, ((x1, y1), (x2, y2)) in enumerate(zip(stroke.points, stroke.points[1:])):
-            width = stroke_width(stroke, (stroke.pressures[index] + stroke.pressures[index + 1]) / 2)
+        outline = stroke_outline(stroke)
+        if outline:
             paths.append(
-                f'<path d="M {fmt(x1)} {fmt(y1)} L {fmt(x2)} {fmt(y2)}" fill="none" stroke="{color_hex(stroke.color)}" stroke-opacity="{fmt(stroke.opacity)}" '
-                f'stroke-width="{fmt(width)}" stroke-linecap="round" stroke-linejoin="round"/>'
+                f'<path d="{svg_path(outline)}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
             )
     images = []
     for image in page.images:
@@ -237,17 +278,12 @@ def pdf_stream(page: Page) -> bytes:
         )
     for stroke in page.strokes:
         red, green, blue = (channel / 255 for channel in stroke.color)
-        commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} RG")
+        outline = stroke_outline(stroke)
+        if not outline:
+            continue
+        commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} rg")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        for index, ((x1, y1), (x2, y2)) in enumerate(zip(stroke.points, stroke.points[1:])):
-            width = stroke_width(stroke, (stroke.pressures[index] + stroke.pressures[index + 1]) / 2)
-            commands.extend(
-                [
-                    f"{fmt(width)} w 1 J 1 j",
-                    f"{fmt(x1)} {fmt(page.height - y1)} m",
-                    f"{fmt(x2)} {fmt(page.height - y2)} l S",
-                ]
-            )
+        commands.extend(pdf_path(outline, page.height))
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
@@ -431,7 +467,7 @@ def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
     width = 1000.0
     height = width / ratio
     images: list[ImageElement] = []
-    for element in page_data.get("pageElement", []):
+    for element in sorted(page_data.get("pageElement", []), key=lambda item: item.get("positionZ", 0)):
         if element.get("elementType") != 1:
             continue
         data = files.get(source_name(element.get("filePath", "")))
@@ -443,14 +479,16 @@ def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
             mime_type = "image/png"
         else:
             continue
+        element_width = element.get("width", 1) * width
+        element_height = element.get("height", 1) * height
         images.append(
             ImageElement(
                 data=data,
                 mime_type=mime_type,
                 x=element.get("positionX", 0) * width,
                 y=element.get("positionY", 0) * height,
-                width=element.get("width", 1) * width,
-                height=element.get("height", 1) * height,
+                width=element_width,
+                height=element_height,
                 angle=element.get("angle", 0),
             )
         )
