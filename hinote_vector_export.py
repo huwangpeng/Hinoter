@@ -293,9 +293,18 @@ def svg_document(title: str, page: Page) -> str:
     )
 
 
+def blend(color: tuple[int, int, int], background: tuple[int, int, int], opacity: float) -> tuple[float, float, float]:
+    """Alpha-blend *color* over *background* at the given *opacity*."""
+    if opacity >= 1:
+        return (channel / 255 for channel in color)
+    bg = (channel / 255 for channel in background)
+    fg = (channel / 255 for channel in color)
+    return (o * f + (1 - o) * b for o, f, b in zip((opacity,) * 3, fg, bg))
+
+
 def pdf_stream(page: Page) -> bytes:
-    red, green, blue = (channel / 255 for channel in page.background)
-    commands = [f"{fmt(red)} {fmt(green)} {fmt(blue)} rg", f"0 0 {fmt(page.width)} {fmt(page.height)} re f"]
+    bg_r, bg_g, bg_b = (channel / 255 for channel in page.background)
+    commands = [f"{fmt(bg_r)} {fmt(bg_g)} {fmt(bg_b)} rg", f"0 0 {fmt(page.width)} {fmt(page.height)} re f"]
     for index, image in enumerate(page.images):
         if image.mime_type not in {"image/jpeg", "image/png"}:
             continue
@@ -315,9 +324,8 @@ def pdf_stream(page: Page) -> bytes:
             ]
         )
     for stroke in page.strokes:
-        red, green, blue = (channel / 255 for channel in stroke.color)
+        red, green, blue = blend(stroke.color, page.background, stroke.opacity)
         commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} rg")
-        commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
         outline = stroke_outline(stroke)
         if not outline:
             continue
@@ -451,22 +459,15 @@ def write_pdf(destination: Path, pages: list[Page]) -> None:
                     + compressed_rgb
                     + b"\nendstream"
                 )
-        for opacity in sorted({stroke.opacity for stroke in page.strokes}):
-            opacity_ids[opacity] = len(objects) + 1
-            objects.append(f"<< /Type /ExtGState /CA {fmt(opacity)} /ca {fmt(opacity)} >>".encode("ascii"))
         stream = pdf_stream(page)
         content_id = len(objects) + 1
         page_id = content_id + 1
         objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"endstream")
         xobjects = " ".join(f"/Im{index} {object_id} 0 R" for index, object_id in image_ids.items())
-        states = " ".join(
-            f"/GS{fmt(opacity).replace('.', '_')} {object_id} 0 R"
-            for opacity, object_id in opacity_ids.items()
-        )
         objects.append(
             (
                 f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {fmt(page.width)} {fmt(page.height)}] "
-                f"/Contents {content_id} 0 R /Resources << /XObject << {xobjects} >> /ExtGState << {states} >> >> >>"
+                f"/Contents {content_id} 0 R /Resources << /XObject << {xobjects} >> >> >>"
             ).encode("ascii")
         )
         page_ids.append(page_id)
