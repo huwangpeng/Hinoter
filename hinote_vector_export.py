@@ -537,6 +537,7 @@ def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
         elif element.get("elementType") == 0:
             html = element.get("html", "")
             scale = element.get("scale", 1.0)
+            src_dpi = int(json.loads(element.get("data1", "{}")).get("sourceDpi", 400))
             lines = []
             import html as html_mod
             import re
@@ -553,12 +554,15 @@ def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
                 b_val = int(color_hex_val[6:8], 16) if len(color_hex_val) >= 6 else 0
                 if a_val < 128:
                     continue
-                lines.append((text, r_val, g_val, b_val, font_size * scale))
+                font_px = font_size * scale * src_dpi / 24
+                lines.append((text, r_val, g_val, b_val, font_px))
             if lines:
+                ex = max(0, element.get("positionX", 0) * width)
+                ey = max(0, element.get("positionY", 0) * height)
                 texts.append(TextElement(
                     lines=lines,
-                    x=element.get("positionX", 0) * width,
-                    y=element.get("positionY", 0) * height,
+                    x=ex,
+                    y=ey,
                     width=element.get("width", 1) * width,
                     height=element.get("height", 1) * height,
                 ))
