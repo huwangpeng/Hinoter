@@ -12,6 +12,7 @@ import math
 import shutil
 import struct
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,8 @@ class Stroke:
     points: list[tuple[float, float]]
     pressures: list[float]
     base_width: float
+    color: tuple[int, int, int]
+    opacity: float
 
 
 @dataclass
@@ -62,32 +65,35 @@ def read_be_float(data: bytes, offset: int) -> float:
 
 
 def parse_pencilengine(data: bytes) -> list[Stroke]:
-    """Recover point lists from the stable count/stride point-table layout.
+    """Recover the primary PENCILENGINE stroke chain.
 
-    Huawei's bounded-note format stores each pen stroke as a point table with a
-    36-byte point stride. X and Y are the second and third big-endian floats.
-    The surrounding pen metadata is version-dependent, so the parser validates
-    each table itself rather than relying on a fixed record header length.
+    A bounded-note stroke has a 60-byte style record immediately before a
+    ``[0, point_count, 36, 0]`` point table. The table is followed by 64 bytes
+    of index data, then the next style record. Parsing that chain is essential:
+    scanning every number-shaped table also finds auxiliary geometry and bends
+    handwriting into unrelated paths.
     """
     if not data.startswith(PENCIL_ENGINE):
         return []
 
     strokes: list[Stroke] = []
-    for offset in range(0, len(data) - 12, 4):
-        count = read_be_uint(data, offset)
-        table_type = read_be_uint(data, offset + 4)
+    for offset in range(60, len(data) - 16, 4):
+        table_prefix = read_be_uint(data, offset)
+        count = read_be_uint(data, offset + 4)
         stride = read_be_uint(data, offset + 8)
         reserved = read_be_uint(data, offset + 12)
         points_start = offset + 16
         points_end = points_start + count * stride
         if not (
-            2 <= count <= 16_384
-            and 1 <= table_type <= 8
+            table_prefix == 0
+            and 2 <= count <= 16_384
             and stride == POINT_STRIDE
             and reserved == 0
         ):
             continue
-        if points_end > len(data):
+        # The 64-byte index segment after each table distinguishes primary
+        # handwriting tables from coincidental sequences inside metadata.
+        if points_end + 64 > len(data):
             continue
 
         points: list[tuple[float, float]] = []
@@ -119,11 +125,31 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
                     first_pressure = pressure
         else:
             pressures = [0.2] * len(points)
-        base_width = read_be_float(data, offset - 20) if offset >= 20 else 1.0
+        style_offset = offset - 60
+        base_width = read_be_float(data, style_offset + 40)
         if not math.isfinite(base_width) or not 0 < base_width <= 100:
-            base_width = 1.0
-        strokes.append(Stroke(points, pressures, base_width))
+            base_width = 4.0
+        color_value = read_be_uint(data, style_offset + 8)
+        color, opacity = stroke_style(data, style_offset, color_value)
+        strokes.append(Stroke(points, pressures, base_width, color, opacity))
     return strokes
+
+
+def stroke_color(value: int) -> tuple[int, int, int]:
+    # Huawei uses 0xffffffff as the built-in black-ink sentinel. Other values
+    # are stored as ARGB and can be copied directly into the vector output.
+    if value in {0, 0xFFFFFFFF}:
+        return (0, 0, 0)
+    return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+
+
+def stroke_style(data: bytes, style_offset: int, color_value: int) -> tuple[tuple[int, int, int], float]:
+    if color_value not in {0, 0xFFFFFFFF}:
+        return stroke_color(color_value), 1.0
+    components = [read_be_float(data, style_offset + offset) for offset in (20, 24, 28)]
+    if all(math.isfinite(component) and 0 <= component <= 1 for component in components) and any(components):
+        return tuple(round(component * 255) for component in components), 0.38
+    return (0, 0, 0), 1.0
 
 
 def bounds(strokes: list[Stroke]) -> tuple[float, float, float, float]:
@@ -147,13 +173,17 @@ def stroke_width(stroke: Stroke, pressure: float) -> float:
     return max(0.25, pressure * stroke.base_width * 10)
 
 
+def color_hex(color: tuple[int, int, int]) -> str:
+    return "#" + "".join(f"{channel:02x}" for channel in color)
+
+
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
         for index, ((x1, y1), (x2, y2)) in enumerate(zip(stroke.points, stroke.points[1:])):
             width = stroke_width(stroke, (stroke.pressures[index] + stroke.pressures[index + 1]) / 2)
             paths.append(
-                f'<path d="M {fmt(x1)} {fmt(y1)} L {fmt(x2)} {fmt(y2)}" fill="none" stroke="#111" '
+                f'<path d="M {fmt(x1)} {fmt(y1)} L {fmt(x2)} {fmt(y2)}" fill="none" stroke="{color_hex(stroke.color)}" stroke-opacity="{fmt(stroke.opacity)}" '
                 f'stroke-width="{fmt(width)}" stroke-linecap="round" stroke-linejoin="round"/>'
             )
     images = []
@@ -188,7 +218,7 @@ def pdf_stream(page: Page) -> bytes:
     red, green, blue = (channel / 255 for channel in page.background)
     commands = [f"{fmt(red)} {fmt(green)} {fmt(blue)} rg", f"0 0 {fmt(page.width)} {fmt(page.height)} re f"]
     for index, image in enumerate(page.images):
-        if image.mime_type != "image/jpeg":
+        if image.mime_type not in {"image/jpeg", "image/png"}:
             continue
         angle = math.radians(-image.angle)
         cosine = math.cos(angle)
@@ -205,8 +235,10 @@ def pdf_stream(page: Page) -> bytes:
                 "Q",
             ]
         )
-    commands.append("0 0 0 RG")
     for stroke in page.strokes:
+        red, green, blue = (channel / 255 for channel in stroke.color)
+        commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} RG")
+        commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
         for index, ((x1, y1), (x2, y2)) in enumerate(zip(stroke.points, stroke.points[1:])):
             width = stroke_width(stroke, (stroke.pressures[index] + stroke.pressures[index + 1]) / 2)
             commands.extend(
@@ -237,34 +269,127 @@ def jpeg_size(data: bytes) -> tuple[int, int]:
     raise ValueError("JPEG dimensions were not found")
 
 
+def png_to_pdf_image(data: bytes) -> tuple[int, int, bytes, bytes | None]:
+    """Decode a non-interlaced RGB/RGBA PNG into PDF image sample data."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("not a PNG")
+    offset = 8
+    chunks: list[bytes] = []
+    width = height = bit_depth = color_type = interlace = None
+    while offset + 8 <= len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        name = data[offset + 4:offset + 8]
+        payload = data[offset + 8:offset + 8 + length]
+        offset += 12 + length
+        if name == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(">IIBBBBB", payload)
+        elif name == b"IDAT":
+            chunks.append(payload)
+        elif name == b"IEND":
+            break
+    if bit_depth != 8 or color_type not in {2, 6} or interlace != 0:
+        raise ValueError("unsupported PNG layout")
+    channels = 4 if color_type == 6 else 3
+    raw = zlib.decompress(b"".join(chunks))
+    stride = width * channels
+    rows: list[bytearray] = []
+    cursor = 0
+    for _ in range(height):
+        filter_type = raw[cursor]
+        cursor += 1
+        row = bytearray(raw[cursor:cursor + stride])
+        cursor += stride
+        previous = rows[-1] if rows else bytearray(stride)
+        for index in range(stride):
+            left = row[index - channels] if index >= channels else 0
+            up = previous[index]
+            up_left = previous[index - channels] if index >= channels else 0
+            if filter_type == 1:
+                row[index] = (row[index] + left) & 0xFF
+            elif filter_type == 2:
+                row[index] = (row[index] + up) & 0xFF
+            elif filter_type == 3:
+                row[index] = (row[index] + ((left + up) // 2)) & 0xFF
+            elif filter_type == 4:
+                prediction = left + up - up_left
+                distances = (abs(prediction - left), abs(prediction - up), abs(prediction - up_left))
+                row[index] = (row[index] + (left, up, up_left)[distances.index(min(distances))]) & 0xFF
+            elif filter_type != 0:
+                raise ValueError("unsupported PNG filter")
+        rows.append(row)
+    if channels == 3:
+        return width, height, b"".join(rows), None
+    rgb = bytearray()
+    alpha = bytearray()
+    for row in rows:
+        for index in range(0, stride, 4):
+            rgb.extend(row[index:index + 3])
+            alpha.append(row[index + 3])
+    return width, height, bytes(rgb), bytes(alpha)
+
+
 def write_pdf(destination: Path, pages: list[Page]) -> None:
     objects: list[bytes] = [b"<< /Type /Catalog /Pages 2 0 R >>", b""]
     page_ids: list[int] = []
     for page in pages:
         image_ids: dict[int, int] = {}
+        opacity_ids: dict[float, int] = {}
         for index, image in enumerate(page.images):
-            if image.mime_type != "image/jpeg":
-                continue
-            image_width, image_height = jpeg_size(image.data)
-            image_ids[index] = len(objects) + 1
-            objects.append(
-                (
-                    f"<< /Type /XObject /Subtype /Image /Width {image_width} /Height {image_height} "
-                    "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
-                    f"/Length {len(image.data)} >>\nstream\n"
-                ).encode("ascii")
-                + image.data
-                + b"\nendstream"
-            )
+            if image.mime_type == "image/jpeg":
+                image_width, image_height = jpeg_size(image.data)
+                image_ids[index] = len(objects) + 1
+                objects.append(
+                    (
+                        f"<< /Type /XObject /Subtype /Image /Width {image_width} /Height {image_height} "
+                        "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
+                        f"/Length {len(image.data)} >>\nstream\n"
+                    ).encode("ascii")
+                    + image.data
+                    + b"\nendstream"
+                )
+            elif image.mime_type == "image/png":
+                image_width, image_height, rgb, alpha = png_to_pdf_image(image.data)
+                alpha_id = None
+                if alpha is not None:
+                    alpha_id = len(objects) + 1
+                    compressed_alpha = zlib.compress(alpha)
+                    objects.append(
+                        (
+                            f"<< /Type /XObject /Subtype /Image /Width {image_width} /Height {image_height} "
+                            "/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode "
+                            f"/Length {len(compressed_alpha)} >>\nstream\n"
+                        ).encode("ascii")
+                        + compressed_alpha
+                        + b"\nendstream"
+                    )
+                image_ids[index] = len(objects) + 1
+                compressed_rgb = zlib.compress(rgb)
+                mask = f" /SMask {alpha_id} 0 R" if alpha_id else ""
+                objects.append(
+                    (
+                        f"<< /Type /XObject /Subtype /Image /Width {image_width} /Height {image_height} "
+                        "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode "
+                        f"/Length {len(compressed_rgb)}{mask} >>\nstream\n"
+                    ).encode("ascii")
+                    + compressed_rgb
+                    + b"\nendstream"
+                )
+        for opacity in sorted({stroke.opacity for stroke in page.strokes}):
+            opacity_ids[opacity] = len(objects) + 1
+            objects.append(f"<< /Type /ExtGState /CA {fmt(opacity)} /ca {fmt(opacity)} >>".encode("ascii"))
         stream = pdf_stream(page)
         content_id = len(objects) + 1
         page_id = content_id + 1
         objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"endstream")
         xobjects = " ".join(f"/Im{index} {object_id} 0 R" for index, object_id in image_ids.items())
+        states = " ".join(
+            f"/GS{fmt(opacity).replace('.', '_')} {object_id} 0 R"
+            for opacity, object_id in opacity_ids.items()
+        )
         objects.append(
             (
                 f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {fmt(page.width)} {fmt(page.height)}] "
-                f"/Contents {content_id} 0 R /Resources << /XObject << {xobjects} >> >> >>"
+                f"/Contents {content_id} 0 R /Resources << /XObject << {xobjects} >> /ExtGState << {states} >> >> >>"
             ).encode("ascii")
         )
         page_ids.append(page_id)
@@ -303,8 +428,8 @@ def source_name(path: str) -> str:
 
 def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
     ratio = page_data.get("pageRatio") or 0.706
-    height = 1000.0
-    width = height * ratio
+    width = 1000.0
+    height = width / ratio
     images: list[ImageElement] = []
     for element in page_data.get("pageElement", []):
         if element.get("elementType") != 1:

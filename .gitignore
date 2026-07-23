@@ -1,5 +1,6 @@
 extracted/
 parsed/
 vector-export/
+vector-export-1/
 __pycache__/
 *.pyc
