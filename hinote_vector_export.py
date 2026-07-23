@@ -163,17 +163,70 @@ def color_hex(color: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{c:02x}" for c in color)
 
 
+def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
+    samples = list(zip(stroke.points, stroke.pressures))
+    n = len(samples)
+    if n < 2:
+        return []
+    tangents: list[tuple[float, float]] = []
+    for i in range(n):
+        if i == 0:
+            dx = samples[1][0][0] - samples[0][0][0]
+            dy = samples[1][0][1] - samples[0][0][1]
+        elif i == n - 1:
+            dx = samples[n - 1][0][0] - samples[n - 2][0][0]
+            dy = samples[n - 1][0][1] - samples[n - 2][0][1]
+        else:
+            dx = samples[i + 1][0][0] - samples[i - 1][0][0]
+            dy = samples[i + 1][0][1] - samples[i - 1][0][1]
+        L = math.hypot(dx, dy)
+        tangents.append((dx / L, dy / L) if L else (1.0, 0.0))
+
+    left: list[tuple[float, float]] = []
+    right: list[tuple[float, float]] = []
+    cx: list[float] = []
+    cy: list[float] = []
+    rad: list[float] = []
+    for i in range(n):
+        tx, ty = tangents[i]
+        nx, ny = -ty, tx
+        r = stroke_width(stroke, samples[i][1]) / 2
+        if i == 0 or i == n - 1:
+            r *= 0.12
+        x, y = samples[i][0]
+        left.append((x + nx * r, y + ny * r))
+        right.append((x - nx * r, y - ny * r))
+        cx.append(x)
+        cy.append(y)
+        rad.append(r)
+
+    outline = list(left)
+    # End cap: from Left[n-1] to Right[n-1] bulging forward
+    a0 = math.atan2(left[n - 1][1] - cy[n - 1], left[n - 1][0] - cx[n - 1])
+    for step in range(1, 9):
+        a = a0 - math.pi * step / 8
+        outline.append((cx[n - 1] + rad[n - 1] * math.cos(a), cy[n - 1] + rad[n - 1] * math.sin(a)))
+    outline.extend(reversed(right))
+    # Start cap: from Right[0] to Left[0] bulging backward
+    a0 = math.atan2(right[0][1] - cy[0], right[0][0] - cx[0])
+    for step in range(1, 9):
+        a = a0 - math.pi * step / 8
+        outline.append((cx[0] + rad[0] * math.cos(a), cy[0] + rad[0] * math.sin(a)))
+    return outline
+
+
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
-        w = sum(stroke_width(stroke, p) for p in stroke.pressures) / len(stroke.pressures)
-        d = f"M {fmt(stroke.points[0][0])} {fmt(stroke.points[0][1])}"
-        for pt in stroke.points[1:]:
+        outline = stroke_outline(stroke)
+        if not outline:
+            continue
+        d = f"M {fmt(outline[0][0])} {fmt(outline[0][1])}"
+        for pt in outline[1:]:
             d += f" L {fmt(pt[0])} {fmt(pt[1])}"
+        d += " Z"
         paths.append(
-            f'<path d="{d}" fill="none" stroke="{color_hex(stroke.color)}" '
-            f'stroke-width="{fmt(w)}" stroke-linecap="round" stroke-linejoin="round"'
-            f' stroke-opacity="{fmt(stroke.opacity)}"/>'
+            f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
         )
     images = []
     for image in page.images:
@@ -223,17 +276,16 @@ def pdf_stream(page: Page) -> bytes:
             "Q",
         ])
     for stroke in page.strokes:
-        w = sum(stroke_width(stroke, p) for p in stroke.pressures) / len(stroke.pressures)
+        outline = stroke_outline(stroke)
+        if not outline:
+            continue
         r, g, b = (c / 255 for c in stroke.color)
-        commands.append(f"{fmt(r)} {fmt(g)} {fmt(b)} RG")
         commands.append(f"{fmt(r)} {fmt(g)} {fmt(b)} rg")
-        commands.append(f"{fmt(w)} w 1 J 1 j")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        x0, y0 = stroke.points[0]
-        commands.append(f"{fmt(x0)} {fmt(page.height - y0)} m")
-        for px, py in stroke.points[1:]:
-            commands.append(f"{fmt(px)} {fmt(page.height - py)} l")
-        commands.append("S")
+        commands.append(f"{fmt(outline[0][0])} {fmt(page.height - outline[0][1])} m")
+        for pt in outline[1:]:
+            commands.append(f"{fmt(pt[0])} {fmt(page.height - pt[1])} l")
+        commands.append("h f")
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
