@@ -214,14 +214,8 @@ def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
         tx, ty = tangents[i]
         nx, ny = -ty, tx
         r = stroke_width(stroke, samples[i][1]) / 2
-        if n > 4:
-            cum_start = sum(math.hypot(samples[j][0][0] - samples[j - 1][0][0], samples[j][0][1] - samples[j - 1][0][1]) for j in range(1, i + 1))
-            cum_end = sum(math.hypot(samples[j][0][0] - samples[j - 1][0][0], samples[j][0][1] - samples[j - 1][0][1]) for j in range(i + 1, n))
-            total = cum_start + cum_end
-            if total > 0:
-                frac = min(cum_start, cum_end) / total
-                if frac < 0.15:
-                    r *= 0.12 + 0.88 * (frac / 0.15)
+        if n > 4 and (i == 0 or i == n - 1):
+            r *= 0.12
         x, y = samples[i][0]
         left.append((x + nx * r, y + ny * r))
         right.append((x - nx * r, y - ny * r))
