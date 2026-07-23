@@ -186,7 +186,7 @@ def color_hex(color: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{channel:02x}" for channel in color)
 
 
-def stroke_segments(stroke: Stroke) -> list[list[list[tuple[float, float]]]]:
+def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
     samples = list(zip(stroke.points, stroke.pressures))
     n = len(samples)
     if n < 2:
@@ -214,8 +214,14 @@ def stroke_segments(stroke: Stroke) -> list[list[list[tuple[float, float]]]]:
         tx, ty = tangents[i]
         nx, ny = -ty, tx
         r = stroke_width(stroke, samples[i][1]) / 2
-        if i == 0 or i == n - 1:
-            r *= 0.12
+        if n > 4:
+            cum_start = sum(math.hypot(samples[j][0][0] - samples[j - 1][0][0], samples[j][0][1] - samples[j - 1][0][1]) for j in range(1, i + 1))
+            cum_end = sum(math.hypot(samples[j][0][0] - samples[j - 1][0][0], samples[j][0][1] - samples[j - 1][0][1]) for j in range(i + 1, n))
+            total = cum_start + cum_end
+            if total > 0:
+                frac = min(cum_start, cum_end) / total
+                if frac < 0.15:
+                    r *= 0.12 + 0.88 * (frac / 0.15)
         x, y = samples[i][0]
         left.append((x + nx * r, y + ny * r))
         right.append((x - nx * r, y - ny * r))
@@ -223,24 +229,18 @@ def stroke_segments(stroke: Stroke) -> list[list[list[tuple[float, float]]]]:
         cy.append(y)
         rad.append(r)
 
-    segments: list[list[list[tuple[float, float]]]] = []
-    for i in range(n - 1):
-        # Start cap: left[i] → right[i] via semicircle around (cx[i],cy[i])
-        start_angle = math.atan2(left[i][1] - cy[i], left[i][0] - cx[i])
-        pts = []
-        steps = 8
-        for step in range(steps + 1):
-            a = start_angle + math.pi * step / steps
-            pts.append((cx[i] + rad[i] * math.cos(a), cy[i] + rad[i] * math.sin(a)))
-
-        # End cap: right[i + 1] → left[i + 1] via semicircle
-        end_angle = math.atan2(right[i + 1][1] - cy[i + 1], right[i + 1][0] - cx[i + 1])
-        for step in range(1, steps + 1):
-            a = end_angle + math.pi * step / steps
-            pts.append((cx[i + 1] + rad[i + 1] * math.cos(a), cy[i + 1] + rad[i + 1] * math.sin(a)))
-
-        segments.append(pts)
-    return segments
+    outline = list(left)
+    steps = 16
+    a0 = math.atan2(left[n - 1][1] - cy[n - 1], left[n - 1][0] - cx[n - 1])
+    for step in range(1, steps + 1):
+        a = a0 - math.pi * step / steps
+        outline.append((cx[n - 1] + rad[n - 1] * math.cos(a), cy[n - 1] + rad[n - 1] * math.sin(a)))
+    outline.extend(reversed(right))
+    a0 = math.atan2(right[0][1] - cy[0], right[0][0] - cx[0])
+    for step in range(1, steps + 1):
+        a = a0 - math.pi * step / steps
+        outline.append((cx[0] + rad[0] * math.cos(a), cy[0] + rad[0] * math.sin(a)))
+    return outline
 
 
 
@@ -249,15 +249,16 @@ def stroke_segments(stroke: Stroke) -> list[list[list[tuple[float, float]]]]:
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
-        segments = stroke_segments(stroke)
-        for seg in segments:
-            d = f"M {fmt(seg[0][0])} {fmt(seg[0][1])}"
-            for pt in seg[1:]:
-                d += f" L {fmt(pt[0])} {fmt(pt[1])}"
-            d += " Z"
-            paths.append(
-                f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
-            )
+        outline = stroke_outline(stroke)
+        if not outline:
+            continue
+        d = f"M {fmt(outline[0][0])} {fmt(outline[0][1])}"
+        for pt in outline[1:]:
+            d += f" L {fmt(pt[0])} {fmt(pt[1])}"
+        d += " Z"
+        paths.append(
+            f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
+        )
     images = []
     for image in page.images:
         encoded = base64.b64encode(image.data).decode("ascii")
@@ -308,14 +309,16 @@ def pdf_stream(page: Page) -> bytes:
             ]
         )
     for stroke in page.strokes:
-        red, green, blue = (channel / 255 for channel in stroke.color)
-        commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} rg")
+        outline = stroke_outline(stroke)
+        if not outline:
+            continue
+        r, g, b = (c / 255 for c in stroke.color)
+        commands.append(f"{fmt(r)} {fmt(g)} {fmt(b)} rg")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        for seg in stroke_segments(stroke):
-            commands.append(f"{fmt(seg[0][0])} {fmt(page.height - seg[0][1])} m")
-            for pt in seg[1:]:
-                commands.append(f"{fmt(pt[0])} {fmt(page.height - pt[1])} l")
-            commands.append("h f")
+        commands.append(f"{fmt(outline[0][0])} {fmt(page.height - outline[0][1])} m")
+        for pt in outline[1:]:
+            commands.append(f"{fmt(pt[0])} {fmt(page.height - pt[1])} l")
+        commands.append("h f")
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
