@@ -148,7 +148,10 @@ def stroke_style(data: bytes, style_offset: int, color_value: int) -> tuple[tupl
         return stroke_color(color_value), 1.0
     components = [read_be_float(data, style_offset + offset) for offset in (20, 24, 28)]
     if all(math.isfinite(component) and 0 <= component <= 1 for component in components) and any(components):
-        return tuple(round(component * 255) for component in components), 0.38
+        # These RGB fields are also used by ordinary colored handwriting. The
+        # PENCILENGINE style segment has no reliable highlighter flag, so keep
+        # them opaque rather than incorrectly fading colored text.
+        return tuple(round(component * 255) for component in components), 1.0
     return (0, 0, 0), 1.0
 
 
@@ -177,7 +180,7 @@ def color_hex(color: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{channel:02x}" for channel in color)
 
 
-def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
+def stroke_outline(stroke: Stroke) -> tuple[list[tuple[float, float]], tuple[float, float], tuple[float, float]]:
     """Build one smooth variable-width polygon for a complete pen stroke."""
     samples = list(zip(stroke.points, stroke.pressures))
     compact: list[tuple[tuple[float, float], float]] = []
@@ -187,7 +190,7 @@ def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
         else:
             compact.append((point, pressure))
     if len(compact) < 2:
-        return []
+        return [], (0, 0), (0, 0)
 
     left: list[tuple[float, float]] = []
     right: list[tuple[float, float]] = []
@@ -201,31 +204,48 @@ def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
             continue
         normal_x = -dy / length
         normal_y = dx / length
-        radius = stroke_width(stroke, pressure) / 2
+        # Preserve a calligraphic taper at the two ends while keeping the
+        # body width driven by the recorded pressure.
+        taper = 0.2 if index in {0, len(compact) - 1} else 1.0
+        radius = stroke_width(stroke, pressure) * taper / 2
         left.append((x + normal_x * radius, y + normal_y * radius))
         right.append((x - normal_x * radius, y - normal_y * radius))
-    return left + list(reversed(right))
+    return left + list(reversed(right)), compact[0][0], compact[-1][0]
 
 
-def svg_path(points: list[tuple[float, float]]) -> str:
+def svg_path(points: list[tuple[float, float]], start_tip: tuple[float, float], end_tip: tuple[float, float]) -> str:
     commands = [f"M {fmt(points[0][0])} {fmt(points[0][1])}"]
-    commands.extend(f"L {fmt(x)} {fmt(y)}" for x, y in points[1:])
-    return " ".join(commands) + " Z"
+    for index in range(1, len(points) - 1):
+        midpoint = ((points[index][0] + points[index + 1][0]) / 2, (points[index][1] + points[index + 1][1]) / 2)
+        commands.append(f"Q {fmt(points[index][0])} {fmt(points[index][1])} {fmt(midpoint[0])} {fmt(midpoint[1])}")
+    commands.append(f"Q {fmt(points[-1][0])} {fmt(points[-1][1])} {fmt(start_tip[0])} {fmt(start_tip[1])}")
+    commands.append(f"Q {fmt(points[0][0])} {fmt(points[0][1])} {fmt(points[0][0])} {fmt(points[0][1])} Z")
+    return " ".join(commands)
 
 
-def pdf_path(points: list[tuple[float, float]], page_height: float) -> list[str]:
+def pdf_path(points: list[tuple[float, float]], start_tip: tuple[float, float], page_height: float) -> list[str]:
     commands = [f"{fmt(points[0][0])} {fmt(page_height - points[0][1])} m"]
-    commands.extend(f"{fmt(x)} {fmt(page_height - y)} l" for x, y in points[1:])
+    current = points[0]
+    for index in range(1, len(points) - 1):
+        control = points[index]
+        end = ((points[index][0] + points[index + 1][0]) / 2, (points[index][1] + points[index + 1][1]) / 2)
+        cubic_one = (current[0] + (control[0] - current[0]) * 2 / 3, current[1] + (control[1] - current[1]) * 2 / 3)
+        cubic_two = (end[0] + (control[0] - end[0]) * 2 / 3, end[1] + (control[1] - end[1]) * 2 / 3)
+        commands.append(
+            f"{fmt(cubic_one[0])} {fmt(page_height - cubic_one[1])} {fmt(cubic_two[0])} {fmt(page_height - cubic_two[1])} {fmt(end[0])} {fmt(page_height - end[1])} c"
+        )
+        current = end
+    commands.append(f"{fmt(points[-1][0])} {fmt(page_height - points[-1][1])} {fmt(start_tip[0])} {fmt(page_height - start_tip[1])} {fmt(points[0][0])} {fmt(page_height - points[0][1])} c")
     return commands + ["h f"]
 
 
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
-        outline = stroke_outline(stroke)
+        outline, start_tip, end_tip = stroke_outline(stroke)
         if outline:
             paths.append(
-                f'<path d="{svg_path(outline)}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
+                f'<path d="{svg_path(outline, start_tip, end_tip)}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
             )
     images = []
     for image in page.images:
@@ -271,19 +291,19 @@ def pdf_stream(page: Page) -> bytes:
                 "q",
                 f"1 0 0 1 {fmt(center_x)} {fmt(center_y)} cm",
                 f"{fmt(cosine)} {fmt(sine)} {fmt(-sine)} {fmt(cosine)} 0 0 cm",
-                f"{fmt(image.width)} 0 0 {fmt(image.height)} -0.5 -0.5 cm",
+                f"{fmt(image.width)} 0 0 {fmt(image.height)} {fmt(-image.width / 2)} {fmt(-image.height / 2)} cm",
                 f"/Im{index} Do",
                 "Q",
             ]
         )
     for stroke in page.strokes:
         red, green, blue = (channel / 255 for channel in stroke.color)
-        outline = stroke_outline(stroke)
+        outline, start_tip, end_tip = stroke_outline(stroke)
         if not outline:
             continue
         commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} rg")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        commands.extend(pdf_path(outline, page.height))
+        commands.extend(pdf_path(outline, start_tip, page.height))
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
