@@ -1,6 +1,13 @@
-extracted/
-parsed/
+# 输出目录 - 矢量导出产物（不提交）
+out/
 vector-export/
 vector-export-1/
+extracted/
+parsed/
+
+# Python 缓存
 __pycache__/
 *.pyc
+
+# WorkBuddy 工作内存
+.workbuddy/

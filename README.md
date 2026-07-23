@@ -1,43 +1,72 @@
-# 华为笔记 `.hinote` 解析实验
+# 华为笔记 `.hinote` 解析与矢量导出工具
 
-两份样本均为 ZIP 容器。容器内的 `.jhinote` 文件是 GZIP 压缩的 UTF-8 JSON，图片保持 PNG/JPEG 原格式，手写笔迹则使用华为私有二进制格式。
+解析华为笔记 `.hinote` 文件格式，将手写笔迹、文本、图片和背景模板还原为矢量 SVG / PDF。
 
-## 使用方法
+## 项目结构
 
-```powershell
-python hinote_extract.py "无边.hinote" "有界.hinote"
+```
+hinoter/
+├── src/
+│   └── hinote_vector_export.py   # 核心导出脚本
+├── web/
+│   └── hinote-viewer.html        # 纯本地网页查看器
+├── samples/                      # 笔记样本文件
+│   ├── 1.hinote                  # 25 页有界笔记（大样本）
+│   ├── 2.hinote                  # 4 页有界笔记
+│   ├── 有界.hinote               # 1 页有界笔记
+│   ├── 无边.hinote               # 无边画布笔记
+│   └── 页面样例.hinote           # 6 页背景模板示范
+├── docs/                         # 格式文档
+│   ├── HINOTE_FORMAT.md          # 格式逆向文档
+│   └── 解析结果.md               # 初步解析记录
+├── tools/                        # 辅助工具 & 测试
+│   ├── check_final.py            # 渲染正确性验证
+│   ├── _grid_detect.py           # 背景网格间距检测
+│   └── _test_web.mjs             # 网页核心逻辑测试
+├── out/                          # 导出产物（SVG/PDF）— 不提交
+├── README.md
+└── .gitignore
 ```
 
-结果默认写入 `parsed/<文件名>/`：
-
-- `raw/`：ZIP 中的原始条目
-- `decoded/`：解压后的 `.jhinote.json`
-- `metadata.json`：汇总元数据、页面、文件签名和哈希
-- `report.md`：便于阅读的结构报告
-
-本机安装 Tesseract 并准备中文语言数据后，可以同时 OCR 图片资源：
+## Python 导出
 
 ```powershell
-python hinote_extract.py "无边.hinote" "有界.hinote" `
-  --ocr-language chi_sim `
-  --tessdata-dir "C:\path\to\tessdata"
+python src/hinote_vector_export.py "samples/有界.hinote"
 ```
 
-## 已识别格式
+结果写入 `out/<文件名>/`：
+- `svg/page_*.svg` — 每页独立矢量图
+- `<文件名>.pdf` — 汇总 PDF（含字体子集化）
+- `report.md` — 导出摘要
 
-- `PENCILENGINE`：有界笔记的笔迹数据，样本采用大端数值记录。
-- `PENKITINFENG`：无界画布的分块笔迹数据，文件名中的坐标表示画布分块。
-- `gsd_*.bin` / `ged_*.bin`：无界笔记全局状态数据。
-- `*_navigation.json`：无界画布浏览位置和当前视图索引。
+### 依赖
 
-私有笔迹二进制中不存在可直接提取的正文字符串。当前工具保留这些文件并报告格式与大小；可读内容优先来自原始图片、缩略图和 OCR。
+- `fonttools` — CJK 字体子集化（PDF 文本必需）
+- `pymupdf`（可选）— 渲染 PDF 预览验证
 
-## 矢量导出
+## 网页查看器
 
-```powershell
-python hinote_vector_export.py "有界.hinote" "无边.hinote"
-```
+直接打开 `web/hinote-viewer.html` 即可使用：
 
-`PENCILENGINE` 笔迹会导出为 SVG `<path>`，并汇总为一个 PDF；两种输出都保持笔迹为矢量路径，缩放不会失真。导出严格按原始的“样式记录、点表、索引记录”笔画链解析，读取逐点压感、画布单位的笔刷宽度和颜色，并保留页面背景与 JPEG/PNG 元素。每个原始笔画会生成一条连续的圆滑可变宽度填充轮廓，并包含渐缩收尾，避免逐段圆帽造成的凸起和断裂。输出在 `vector-export/<文件名>/`。
+- 拖入 `.hinote` 文件或点击选择
+- **全部计算在浏览器本地完成**，不上传任何数据
+- 支持笔迹、文本、图片、背景网格的 SVG 预览
+- 可下载单页 SVG 和汇总 PDF
+- 带进度条和响应式设计
 
-无界笔记的 `PENKITINFENG` 分块笔迹与有界格式不同。工具会识别并报告这些块，但不会用缩略图替代为伪矢量内容。
+## 已支持的格式特性
+
+- **有界笔记 (PENCILENGINE)**：笔迹、文本框、图片、背景模板
+- **背景模板**：宽横格、窄横格、点阵、小格子、中格子、空白
+- **笔迹颜色**：普通笔、荧光笔（含老版本兼容）
+- **笔迹渲染**：可变宽度矢量轮廓、圆弧端帽、收细算法
+- **输出的PDF**：矢量笔迹路径、贴合的图片、子集化字体文本
+
+## 待完成
+
+- **无边画布 (PENKITINFENG)** 解码 — 分块笔迹的 stride、网格拼装
+
+## 参考
+
+- 文件格式详见 `docs/HINOTE_FORMAT.md`
+- `.hinote` = ZIP 容器；`.jhinote` = GZIP+JSON 页面描述；笔迹为华为私有二进制
