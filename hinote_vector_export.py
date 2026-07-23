@@ -65,35 +65,36 @@ def read_be_float(data: bytes, offset: int) -> float:
 
 
 def parse_pencilengine(data: bytes) -> list[Stroke]:
-    """Recover the primary PENCILENGINE stroke chain.
+    """Recover all PENCILENGINE strokes by scanning for table headers.
 
-    A bounded-note stroke has a 60-byte style record immediately before a
-    ``[0, point_count, 36, 0]`` point table. The table is followed by 64 bytes
-    of index data, then the next style record. Parsing that chain is essential:
-    scanning every number-shaped table also finds auxiliary geometry and bends
-    handwriting into unrelated paths.
+    Each stroke consists of:
+      60-byte style record → [prefix, point_count, 36, 0] → N×36‑byte samples → padding
+
+    Both prefix=0 (regular strokes) and prefix=2 (special strokes such
+    as highlighters) are accepted.  The scan approach skips by the
+    declared point-table length after each match, so it is immune to
+    false positives that arise when random data inside the padding
+    region happens to look like a table header.
     """
     if not data.startswith(PENCIL_ENGINE):
         return []
 
     strokes: list[Stroke] = []
     for offset in range(60, len(data) - 16, 4):
-        table_prefix = read_be_uint(data, offset)
+        prefix = read_be_uint(data, offset)
         count = read_be_uint(data, offset + 4)
         stride = read_be_uint(data, offset + 8)
         reserved = read_be_uint(data, offset + 12)
         points_start = offset + 16
         points_end = points_start + count * stride
         if not (
-            table_prefix == 0
+            prefix in (0, 2)
             and 2 <= count <= 16_384
             and stride == POINT_STRIDE
             and reserved == 0
         ):
             continue
-        # The 64-byte index segment after each table distinguishes primary
-        # handwriting tables from coincidental sequences inside metadata.
-        if points_end + 64 > len(data):
+        if points_end > len(data):
             continue
 
         points: list[tuple[float, float]] = []
@@ -111,7 +112,6 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
         if len(points) < 2:
             continue
 
-        # Reject tables that happen to resemble a header inside metadata.
         x_span = max(x for x, _ in points) - min(x for x, _ in points)
         y_span = max(y for _, y in points) - min(y for _, y in points)
         if x_span == 0 and y_span == 0:
@@ -125,13 +125,18 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
                     first_pressure = pressure
         else:
             pressures = [0.2] * len(points)
+
         style_offset = offset - 60
+        if style_offset < 0:
+            continue
         base_width = read_be_float(data, style_offset + 40)
         if not math.isfinite(base_width) or not 0 < base_width <= 100:
             base_width = 4.0
-        color_value = read_be_uint(data, style_offset + 8)
         pen_type = read_be_uint(data, style_offset + 12)
-        softness = read_be_float(data, style_offset + 32)  # float[8].
+        if pen_type not in (1, 2, 3, 5):
+            continue
+        softness = read_be_float(data, style_offset + 32)
+        color_value = read_be_uint(data, style_offset + 8)
         color, opacity = stroke_style(data, style_offset, color_value, pen_type, softness)
         strokes.append(Stroke(points, pressures, base_width, color, opacity))
     return strokes
