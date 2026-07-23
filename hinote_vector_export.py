@@ -65,19 +65,27 @@ def read_be_float(data: bytes, offset: int) -> float:
 
 
 def parse_pencilengine(data: bytes) -> list[Stroke]:
+    """Recover the primary PENCILENGINE stroke chain.
+
+    A bounded-note stroke has a 60-byte style record immediately before a
+    ``[0, point_count, 36, 0]`` point table. The table is followed by 64 bytes
+    of index data, then the next style record. Parsing that chain is essential:
+    scanning every number-shaped table also finds auxiliary geometry and bends
+    handwriting into unrelated paths.
+    """
     if not data.startswith(PENCIL_ENGINE):
         return []
 
     strokes: list[Stroke] = []
     for offset in range(60, len(data) - 16, 4):
-        prefix = read_be_uint(data, offset)
+        table_prefix = read_be_uint(data, offset)
         count = read_be_uint(data, offset + 4)
         stride = read_be_uint(data, offset + 8)
         reserved = read_be_uint(data, offset + 12)
         points_start = offset + 16
         points_end = points_start + count * stride
         if not (
-            prefix in (0, 2)
+            table_prefix in (0, 2)
             and 2 <= count <= 16_384
             and stride == POINT_STRIDE
             and reserved == 0
@@ -101,21 +109,21 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
         if len(points) < 2:
             continue
 
+        # Reject tables that happen to resemble a header inside metadata.
         x_span = max(x for x, _ in points) - min(x for x, _ in points)
         y_span = max(y for _, y in points) - min(y for _, y in points)
         if x_span == 0 and y_span == 0:
             continue
         if any(pressures):
-            first_pressure = next(p for p in pressures if p > 0)
-            for i, p in enumerate(pressures):
-                pressures[i] = first_pressure if p == 0 else p
-                first_pressure = pressures[i]
+            first_pressure = next(pressure for pressure in pressures if pressure > 0)
+            for index, pressure in enumerate(pressures):
+                if pressure == 0:
+                    pressures[index] = first_pressure
+                else:
+                    first_pressure = pressure
         else:
             pressures = [0.2] * len(points)
-
         style_offset = offset - 60
-        if style_offset < 0:
-            continue
         base_width = read_be_float(data, style_offset + 40)
         if not math.isfinite(base_width) or not 0 < base_width <= 100:
             base_width = 4.0
@@ -130,6 +138,8 @@ def parse_pencilengine(data: bytes) -> list[Stroke]:
 
 
 def stroke_color(value: int) -> tuple[int, int, int]:
+    # Huawei uses 0xffffffff as the built-in black-ink sentinel. Other values
+    # are stored as ARGB and can be copied directly into the vector output.
     if value in {0, 0xFFFFFFFF}:
         return (0, 0, 0)
     return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
@@ -151,19 +161,32 @@ def stroke_style(
     return (0, 0, 0), 1.0
 
 
+def bounds(strokes: list[Stroke]) -> tuple[float, float, float, float]:
+    xs = [x for stroke in strokes for x, _ in stroke.points]
+    ys = [y for stroke in strokes for _, y in stroke.points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def page_geometry(strokes: list[Stroke]) -> tuple[float, float, float, float]:
+    left, top, right, bottom = bounds(strokes)
+    padding = 24.0
+    return left - padding, top - padding, max(1.0, right - left + padding * 2), max(1.0, bottom - top + padding * 2)
+
+
 def fmt(value: float) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
 def stroke_width(stroke: Stroke, pressure: float) -> float:
+    # The record stores normalized pressure and the enclosing pen record base nib.
     return max(0.1, pressure * stroke.base_width)
 
 
 def color_hex(color: tuple[int, int, int]) -> str:
-    return "#" + "".join(f"{c:02x}" for c in color)
+    return "#" + "".join(f"{channel:02x}" for channel in color)
 
 
-def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
+def stroke_segments(stroke: Stroke) -> list[list[list[tuple[float, float]]]]:
     samples = list(zip(stroke.points, stroke.pressures))
     n = len(samples)
     if n < 2:
@@ -200,47 +223,54 @@ def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
         cy.append(y)
         rad.append(r)
 
-    outline = list(left)
-    # End cap: from Left[n-1] to Right[n-1] bulging forward
-    a0 = math.atan2(left[n - 1][1] - cy[n - 1], left[n - 1][0] - cx[n - 1])
-    for step in range(1, 9):
-        a = a0 - math.pi * step / 8
-        outline.append((cx[n - 1] + rad[n - 1] * math.cos(a), cy[n - 1] + rad[n - 1] * math.sin(a)))
-    outline.extend(reversed(right))
-    # Start cap: from Right[0] to Left[0] bulging backward
-    a0 = math.atan2(right[0][1] - cy[0], right[0][0] - cx[0])
-    for step in range(1, 9):
-        a = a0 - math.pi * step / 8
-        outline.append((cx[0] + rad[0] * math.cos(a), cy[0] + rad[0] * math.sin(a)))
-    return outline
+    segments: list[list[list[tuple[float, float]]]] = []
+    for i in range(n - 1):
+        # Start cap: left[i] → right[i] via semicircle around (cx[i],cy[i])
+        start_angle = math.atan2(left[i][1] - cy[i], left[i][0] - cx[i])
+        pts = []
+        steps = 8
+        for step in range(steps + 1):
+            a = start_angle + math.pi * step / steps
+            pts.append((cx[i] + rad[i] * math.cos(a), cy[i] + rad[i] * math.sin(a)))
+
+        # End cap: right[i + 1] → left[i + 1] via semicircle
+        end_angle = math.atan2(right[i + 1][1] - cy[i + 1], right[i + 1][0] - cx[i + 1])
+        for step in range(1, steps + 1):
+            a = end_angle + math.pi * step / steps
+            pts.append((cx[i + 1] + rad[i + 1] * math.cos(a), cy[i + 1] + rad[i + 1] * math.sin(a)))
+
+        segments.append(pts)
+    return segments
+
+
+
 
 
 def svg_document(title: str, page: Page) -> str:
     paths = []
     for stroke in page.strokes:
-        outline = stroke_outline(stroke)
-        if not outline:
-            continue
-        d = f"M {fmt(outline[0][0])} {fmt(outline[0][1])}"
-        for pt in outline[1:]:
-            d += f" L {fmt(pt[0])} {fmt(pt[1])}"
-        d += " Z"
-        paths.append(
-            f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
-        )
+        segments = stroke_segments(stroke)
+        for seg in segments:
+            d = f"M {fmt(seg[0][0])} {fmt(seg[0][1])}"
+            for pt in seg[1:]:
+                d += f" L {fmt(pt[0])} {fmt(pt[1])}"
+            d += " Z"
+            paths.append(
+                f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
+            )
     images = []
     for image in page.images:
         encoded = base64.b64encode(image.data).decode("ascii")
         transform = ""
         if image.angle % 360:
-            cx = image.x + image.width / 2
-            cy = image.y + image.height / 2
-            transform = f' transform="rotate({fmt(image.angle)} {fmt(cx)} {fmt(cy)})"'
+            center_x = image.x + image.width / 2
+            center_y = image.y + image.height / 2
+            transform = f' transform="rotate({fmt(image.angle)} {fmt(center_x)} {fmt(center_y)})"'
         images.append(
-            f'<image href="data:{image.mime_type};base64,{encoded}" x="{fmt(image.x)}" '
-            f'y="{fmt(image.y)}" width="{fmt(image.width)}" height="{fmt(image.height)}"{transform}/>'
+            f'<image href="data:{image.mime_type};base64,{encoded}" x="{fmt(image.x)}" y="{fmt(image.y)}" '
+            f'width="{fmt(image.width)}" height="{fmt(image.height)}"{transform}/>'
         )
-    color = "#" + "".join(f"{c:02x}" for c in page.background)
+    color = "#" + "".join(f"{channel:02x}" for channel in page.background)
     return "\n".join(
         [
             '<?xml version="1.0" encoding="UTF-8"?>',
@@ -257,35 +287,35 @@ def svg_document(title: str, page: Page) -> str:
 
 
 def pdf_stream(page: Page) -> bytes:
-    r, g, b = (c / 255 for c in page.background)
-    commands = [f"{fmt(r)} {fmt(g)} {fmt(b)} rg", f"0 0 {fmt(page.width)} {fmt(page.height)} re f"]
+    red, green, blue = (channel / 255 for channel in page.background)
+    commands = [f"{fmt(red)} {fmt(green)} {fmt(blue)} rg", f"0 0 {fmt(page.width)} {fmt(page.height)} re f"]
     for index, image in enumerate(page.images):
         if image.mime_type not in {"image/jpeg", "image/png"}:
             continue
         angle = math.radians(-image.angle)
-        cos_a = math.cos(angle)
-        sin_a = math.sin(angle)
-        cx = image.x + image.width / 2
-        cy = page.height - image.y - image.height / 2
-        commands.extend([
-            "q",
-            f"1 0 0 1 {fmt(cx)} {fmt(cy)} cm",
-            f"{fmt(cos_a)} {fmt(sin_a)} {fmt(-sin_a)} {fmt(cos_a)} 0 0 cm",
-            f"{fmt(image.width)} 0 0 {fmt(image.height)} {fmt(-image.width / 2)} {fmt(-image.height / 2)} cm",
-            f"/Im{index} Do",
-            "Q",
-        ])
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        center_x = image.x + image.width / 2
+        center_y = page.height - image.y - image.height / 2
+        commands.extend(
+            [
+                "q",
+                f"1 0 0 1 {fmt(center_x)} {fmt(center_y)} cm",
+                f"{fmt(cosine)} {fmt(sine)} {fmt(-sine)} {fmt(cosine)} 0 0 cm",
+                f"{fmt(image.width)} 0 0 {fmt(image.height)} {fmt(-image.width / 2)} {fmt(-image.height / 2)} cm",
+                f"/Im{index} Do",
+                "Q",
+            ]
+        )
     for stroke in page.strokes:
-        outline = stroke_outline(stroke)
-        if not outline:
-            continue
-        r, g, b = (c / 255 for c in stroke.color)
-        commands.append(f"{fmt(r)} {fmt(g)} {fmt(b)} rg")
+        red, green, blue = (channel / 255 for channel in stroke.color)
+        commands.append(f"{fmt(red)} {fmt(green)} {fmt(blue)} rg")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        commands.append(f"{fmt(outline[0][0])} {fmt(page.height - outline[0][1])} m")
-        for pt in outline[1:]:
-            commands.append(f"{fmt(pt[0])} {fmt(page.height - pt[1])} l")
-        commands.append("h f")
+        for seg in stroke_segments(stroke):
+            commands.append(f"{fmt(seg[0][0])} {fmt(page.height - seg[0][1])} m")
+            for pt in seg[1:]:
+                commands.append(f"{fmt(pt[0])} {fmt(page.height - pt[1])} l")
+            commands.append("h f")
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
@@ -301,13 +331,14 @@ def jpeg_size(data: bytes) -> tuple[int, int]:
             continue
         length = struct.unpack_from(">H", data, offset)[0]
         if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
-            h, w = struct.unpack_from(">HH", data, offset + 3)
-            return w, h
+            height, width = struct.unpack_from(">HH", data, offset + 3)
+            return width, height
         offset += length
-    raise ValueError("JPEG dimensions not found")
+    raise ValueError("JPEG dimensions were not found")
 
 
 def png_to_pdf_image(data: bytes) -> tuple[int, int, bytes, bytes | None]:
+    """Decode a non-interlaced RGB/RGBA PNG into PDF image sample data."""
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError("not a PNG")
     offset = 8
@@ -336,21 +367,21 @@ def png_to_pdf_image(data: bytes) -> tuple[int, int, bytes, bytes | None]:
         cursor += 1
         row = bytearray(raw[cursor:cursor + stride])
         cursor += stride
-        prev = rows[-1] if rows else bytearray(stride)
-        for i in range(stride):
-            left = row[i - channels] if i >= channels else 0
-            up = prev[i]
-            up_left = prev[i - channels] if i >= channels else 0
+        previous = rows[-1] if rows else bytearray(stride)
+        for index in range(stride):
+            left = row[index - channels] if index >= channels else 0
+            up = previous[index]
+            up_left = previous[index - channels] if index >= channels else 0
             if filter_type == 1:
-                row[i] = (row[i] + left) & 0xFF
+                row[index] = (row[index] + left) & 0xFF
             elif filter_type == 2:
-                row[i] = (row[i] + up) & 0xFF
+                row[index] = (row[index] + up) & 0xFF
             elif filter_type == 3:
-                row[i] = (row[i] + ((left + up) // 2)) & 0xFF
+                row[index] = (row[index] + ((left + up) // 2)) & 0xFF
             elif filter_type == 4:
-                pred = left + up - up_left
-                dists = (abs(pred - left), abs(pred - up), abs(pred - up_left))
-                row[i] = (row[i] + (left, up, up_left)[dists.index(min(dists))]) & 0xFF
+                prediction = left + up - up_left
+                distances = (abs(prediction - left), abs(prediction - up), abs(prediction - up_left))
+                row[index] = (row[index] + (left, up, up_left)[distances.index(min(distances))]) & 0xFF
             elif filter_type != 0:
                 raise ValueError("unsupported PNG filter")
         rows.append(row)
@@ -359,9 +390,9 @@ def png_to_pdf_image(data: bytes) -> tuple[int, int, bytes, bytes | None]:
     rgb = bytearray()
     alpha = bytearray()
     for row in rows:
-        for i in range(0, stride, 4):
-            rgb.extend(row[i:i + 3])
-            alpha.append(row[i + 3])
+        for index in range(0, stride, 4):
+            rgb.extend(row[index:index + 3])
+            alpha.append(row[index + 3])
     return width, height, bytes(rgb), bytes(alpha)
 
 
@@ -371,72 +402,79 @@ def write_pdf(destination: Path, pages: list[Page]) -> None:
     for page in pages:
         image_ids: dict[int, int] = {}
         opacity_ids: dict[float, int] = {}
-        for idx, image in enumerate(page.images):
+        for index, image in enumerate(page.images):
             if image.mime_type == "image/jpeg":
-                iw, ih = jpeg_size(image.data)
-                image_ids[idx] = len(objects) + 1
+                image_width, image_height = jpeg_size(image.data)
+                image_ids[index] = len(objects) + 1
                 objects.append(
                     (
-                        f"<< /Type /XObject /Subtype /Image /Width {iw} /Height {ih} "
+                        f"<< /Type /XObject /Subtype /Image /Width {image_width} /Height {image_height} "
                         "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
                         f"/Length {len(image.data)} >>\nstream\n"
-                    ).encode("ascii") + image.data + b"\nendstream"
+                    ).encode("ascii")
+                    + image.data
+                    + b"\nendstream"
                 )
             elif image.mime_type == "image/png":
-                iw, ih, rgb, alpha = png_to_pdf_image(image.data)
+                image_width, image_height, rgb, alpha = png_to_pdf_image(image.data)
                 alpha_id = None
                 if alpha is not None:
                     alpha_id = len(objects) + 1
-                    ca = zlib.compress(alpha)
+                    compressed_alpha = zlib.compress(alpha)
                     objects.append(
                         (
-                            f"<< /Type /XObject /Subtype /Image /Width {iw} /Height {ih} "
+                            f"<< /Type /XObject /Subtype /Image /Width {image_width} /Height {image_height} "
                             "/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode "
-                            f"/Length {len(ca)} >>\nstream\n"
-                        ).encode("ascii") + ca + b"\nendstream"
+                            f"/Length {len(compressed_alpha)} >>\nstream\n"
+                        ).encode("ascii")
+                        + compressed_alpha
+                        + b"\nendstream"
                     )
-                image_ids[idx] = len(objects) + 1
-                crgb = zlib.compress(rgb)
+                image_ids[index] = len(objects) + 1
+                compressed_rgb = zlib.compress(rgb)
                 mask = f" /SMask {alpha_id} 0 R" if alpha_id else ""
                 objects.append(
                     (
-                        f"<< /Type /XObject /Subtype /Image /Width {iw} /Height {ih} "
+                        f"<< /Type /XObject /Subtype /Image /Width {image_width} /Height {image_height} "
                         "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode "
-                        f"/Length {len(crgb)}{mask} >>\nstream\n"
-                    ).encode("ascii") + crgb + b"\nendstream"
+                        f"/Length {len(compressed_rgb)}{mask} >>\nstream\n"
+                    ).encode("ascii")
+                    + compressed_rgb
+                    + b"\nendstream"
                 )
-        for opacity in sorted({s.opacity for s in page.strokes}):
+        for opacity in sorted({stroke.opacity for stroke in page.strokes}):
             opacity_ids[opacity] = len(objects) + 1
             objects.append(f"<< /Type /ExtGState /CA {fmt(opacity)} /ca {fmt(opacity)} >>".encode("ascii"))
         stream = pdf_stream(page)
         content_id = len(objects) + 1
         page_id = content_id + 1
         objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"endstream")
-        xobjs = " ".join(f"/Im{idx} {oid} 0 R" for idx, oid in image_ids.items())
+        xobjects = " ".join(f"/Im{index} {object_id} 0 R" for index, object_id in image_ids.items())
         states = " ".join(
-            f"/GS{fmt(op).replace('.', '_')} {oid} 0 R" for op, oid in opacity_ids.items()
+            f"/GS{fmt(opacity).replace('.', '_')} {object_id} 0 R"
+            for opacity, object_id in opacity_ids.items()
         )
         objects.append(
             (
                 f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {fmt(page.width)} {fmt(page.height)}] "
-                f"/Contents {content_id} 0 R /Resources << /XObject << {xobjs} >> /ExtGState << {states} >> >> >>"
+                f"/Contents {content_id} 0 R /Resources << /XObject << {xobjects} >> /ExtGState << {states} >> >> >>"
             ).encode("ascii")
         )
         page_ids.append(page_id)
-    kids = " ".join(f"{pid} 0 R" for pid in page_ids)
+    kids = " ".join(f"{page_id} 0 R" for page_id in page_ids)
     objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>".encode("ascii")
 
     output = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
     offsets = [0]
-    for idx, obj in enumerate(objects, start=1):
+    for index, obj in enumerate(objects, start=1):
         offsets.append(len(output))
-        output.extend(f"{idx} 0 obj\n".encode("ascii"))
+        output.extend(f"{index} 0 obj\n".encode("ascii"))
         output.extend(obj)
         output.extend(b"\nendobj\n")
     xref = len(output)
     output.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii"))
-    for off in offsets[1:]:
-        output.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
     output.extend(
         f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii")
     )
@@ -448,8 +486,8 @@ def decode_jhinote(data: bytes) -> dict:
 
 
 def page_color(value: int) -> tuple[int, int, int]:
-    c = value & 0xFFFFFFFF
-    return (c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF)
+    color = value & 0xFFFFFFFF
+    return (color >> 16 & 0xFF, color >> 8 & 0xFF, color & 0xFF)
 
 
 def source_name(path: str) -> str:
@@ -461,37 +499,43 @@ def build_page(page_data: dict, files: dict[str, bytes]) -> Page:
     width = 1000.0
     height = width / ratio
     images: list[ImageElement] = []
-    for el in sorted(page_data.get("pageElement", []), key=lambda e: e.get("positionZ", 0)):
-        if el.get("elementType") != 1:
+    for element in sorted(page_data.get("pageElement", []), key=lambda item: item.get("positionZ", 0)):
+        if element.get("elementType") != 1:
             continue
-        data = files.get(source_name(el.get("filePath", "")))
+        data = files.get(source_name(element.get("filePath", "")))
         if not data:
             continue
         if data.startswith(b"\xff\xd8\xff"):
-            mime = "image/jpeg"
+            mime_type = "image/jpeg"
         elif data.startswith(b"\x89PNG\r\n\x1a\n"):
-            mime = "image/png"
+            mime_type = "image/png"
         else:
             continue
-        ew = el.get("width", 1) * width
-        eh = el.get("height", 1) * height
-        images.append(ImageElement(
-            data=data, mime_type=mime,
-            x=el.get("positionX", 0) * width,
-            y=el.get("positionY", 0) * height,
-            width=ew, height=eh,
-            angle=el.get("angle", 0),
-        ))
+        element_width = element.get("width", 1) * width
+        element_height = element.get("height", 1) * height
+        images.append(
+            ImageElement(
+                data=data,
+                mime_type=mime_type,
+                x=element.get("positionX", 0) * width,
+                y=element.get("positionY", 0) * height,
+                width=element_width,
+                height=element_height,
+                angle=element.get("angle", 0),
+            )
+        )
     strokes: list[Stroke] = []
-    for att in page_data.get("attachment", []):
-        data = files.get(source_name(att.get("filePath", "")))
+    for attachment in page_data.get("attachment", []):
+        data = files.get(source_name(attachment.get("filePath", "")))
         if data and data.startswith(PENCIL_ENGINE):
             strokes.extend(parse_pencilengine(data))
     return Page(
         name=f"page-{page_data.get('pageNumber', 0)}",
-        width=width, height=height,
+        width=width,
+        height=height,
         background=page_color(page_data.get("pageColor", -1)),
-        strokes=strokes, images=images,
+        strokes=strokes,
+        images=images,
     )
 
 
@@ -507,20 +551,20 @@ def export_archive(archive_path: Path, output_root: Path) -> Path:
     unsupported: list[str] = []
 
     with zipfile.ZipFile(archive_path) as archive:
-        files = {Path(fi.filename).name: archive.read(fi) for fi in archive.infolist() if not fi.is_dir()}
+        files = {Path(info.filename).name: archive.read(info) for info in archive.infolist() if not info.is_dir()}
         page_data: list[dict] = []
-        for fi in archive.infolist():
-            if fi.is_dir():
+        for info in archive.infolist():
+            if info.is_dir():
                 continue
-            data = files[Path(fi.filename).name]
-            name = Path(fi.filename).name
-            if fi.filename.startswith("pages/") and fi.filename.endswith(".jhinote"):
+            data = files[Path(info.filename).name]
+            name = Path(info.filename).name
+            if info.filename.startswith("pages/") and info.filename.endswith(".jhinote"):
                 page_data.append(decode_jhinote(data)["customNotePageContent"])
             elif data.startswith(PENKIT_INFINITE):
                 unsupported.append(f"{name}: PENKITINFENG infinite-canvas block needs a dedicated decoder")
 
-        for pd in sorted(page_data, key=lambda p: p.get("pageNumber", 0)):
-            page = build_page(pd, files)
+        for data in sorted(page_data, key=lambda item: item.get("pageNumber", 0)):
+            page = build_page(data, files)
             if page.strokes or page.images:
                 title = f"{archive_path.name}: {page.name}"
                 (svg_dir / f"{page.name}.svg").write_text(svg_document(title, page), encoding="utf-8")
