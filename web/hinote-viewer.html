@@ -167,8 +167,19 @@
     <div class="meta" id="metaText"></div>
     <div class="actions">
       <button class="btn2" id="btnOpen" style="display:none">打开文件</button>
-      <button class="btn2" id="btnSvg" disabled>下载全部 SVG (.zip)</button>
+      <button class="btn2" id="btnSvg" disabled>下载 SVG (.zip)</button>
       <button class="btn2 primary" id="btnPdf" disabled>导出 PDF</button>
+      <div class="export-png" style="display:inline-flex;align-items:center;gap:6px">
+        <input type="number" id="ppiInput" value="300" min="72" max="1200" style="width:60px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:13px">
+        <span style="font-size:12px;color:var(--muted)">PPI</span>
+        <select id="sizeSelect" style="padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:13px;background:var(--card)">
+          <option value="a4">A4</option>
+          <option value="a3">A3</option>
+          <option value="a5">A5</option>
+          <option value="letter">Letter</option>
+        </select>
+        <button class="btn2" id="btnPng" disabled>导出 PNG</button>
+      </div>
     </div>
   </div>
 
@@ -966,7 +977,7 @@ async function processFile(file) {
     $("btnOpen").style.display = "";
     $("toolbar").style.display = "flex";
     $("metaText").innerHTML = `<b>${file.name}</b> · ${PAGES.length} 页 · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
-    $("btnSvg").disabled = false; $("btnPdf").disabled = false;
+    $("btnSvg").disabled = false; $("btnPdf").disabled = false; $("btnPng").disabled = false;
     await setProgress(100, `完成：${PAGES.length} 页已解析`);
     setTimeout(() => { $("progressWrap").style.display = "none"; }, 1200);
   } catch (err) {
@@ -1040,6 +1051,52 @@ $("btnPdf").onclick = async () => {
     notice("PDF 导出失败：" + err.message);
   }
   $("btnPdf").disabled = false;
+};
+
+$("btnPng").onclick = async () => {
+  if (!SVG_CACHE.length) return;
+  $("btnPng").disabled = true;
+  try {
+    const ppi = parseInt($("ppiInput").value) || 300;
+    const paperSize = $("sizeSelect").value;
+    const paperMm = { a4: [210, 297], a3: [297, 420], a5: [148, 210], letter: [215.9, 279.4] }[paperSize] || [210, 297];
+    const pw = Math.round(paperMm[0] * ppi / 25.4);
+    const ph = Math.round(paperMm[1] * ppi / 25.4);
+    const maxW = Math.max(...PAGES.map(p => p.width));
+    const maxH = Math.max(...PAGES.map(p => p.height));
+    const scale = Math.min(pw / maxW, ph / maxH);
+
+    const total = PAGES.length;
+    for (let i = 0; i < total; i++) {
+      await setProgress(Math.round(100 * i / total), `导出 PNG ${i + 1}/${total}…`);
+      const svgText = SVG_CACHE[i].replace(/<svg[^>]*>/, m => m.replace(/(width|height)="[^"]*"/g, '').replace('>', ` width="${PAGES[i].width}" height="${PAGES[i].height}">`));
+      const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      const drawn = new Promise(resolve => { img.onload = resolve; img.src = url; });
+      await drawn;
+      const w = Math.round(PAGES[i].width * scale);
+      const h = Math.round(PAGES[i].height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      const pngBlob = await new Promise(r => canvas.toBlob(r, "image/png"));
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(pngBlob);
+      a.download = `${ARCHIVE_NAME}-${PAGES[i].name}.png`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+    await setProgress(100, `PNG 导出完成：${total} 页`);
+    setTimeout(() => { $("progressWrap").style.display = "none"; }, 1200);
+  } catch (err) {
+    console.error(err);
+    notice("PNG 导出失败：" + err.message);
+  }
+  $("btnPng").disabled = false;
 };
 </script>
 </body>
