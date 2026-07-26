@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>华为笔记 · 无界画布预览器</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1d2129;
+    --muted: #6b7280; --line: #e5e7eb; --accent: #2563eb;
+    --accent-soft: #dbeafe; --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    background: var(--bg); color: var(--ink); min-height: 100vh;
+  }
+  header { padding: 28px 24px 0; text-align: center; }
+  header h1 { font-size: 24px; font-weight: 700; }
+  header p { margin-top: 4px; color: var(--muted); font-size: 13px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 0 16px 40px; }
+
+  /* Drop zone */
+  #dropzone {
+    border: 2px dashed #c3cbd6; border-radius: var(--radius);
+    background: var(--card); padding: 48px 24px; text-align: center;
+    cursor: pointer; transition: border-color .2s, background .2s;
+    margin-top: 28px;
+  }
+  #dropzone:hover, #dropzone.drag { border-color: var(--accent); background: var(--accent-soft); }
+  #dropzone .icon { font-size: 48px; }
+  #dropzone h2 { font-size: 17px; margin-top: 10px; }
+  #dropzone p { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  #dropzone .btn {
+    display: inline-block; margin-top: 14px; padding: 9px 22px;
+    background: var(--accent); color: #fff; border-radius: 8px; font-size: 14px;
+  }
+  input[type=file] { display: none; }
+  body.loaded #dropzone { display: none; }
+
+  /* Progress */
+  #progressWrap { margin-top: 20px; display: none; }
+  .bar { height: 10px; background: #e9edf3; border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0%; background: linear-gradient(90deg,#2563eb,#38bdf8); border-radius: 99px; transition: width .15s ease; }
+  #progressText { margin-top: 8px; font-size: 13px; color: var(--muted); text-align: center; }
+
+  /* Toolbar */
+  #toolbar { display: none; margin-top: 20px; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  #toolbar .meta { font-size: 14px; color: var(--muted); }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn2 {
+    padding: 9px 18px; border-radius: 8px; font-size: 14px; border: 1px solid var(--line);
+    background: var(--card); color: var(--ink); cursor: pointer; transition: all .15s;
+  }
+  .btn2:hover { border-color: var(--accent); color: var(--accent); }
+  .btn2.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn2.primary:hover { background: #1d4ed8; color:#fff; }
+  .btn2:disabled { opacity: .5; cursor: default; }
+
+  /* Layout: info panel + canvas */
+  #mainPanel { display: none; margin-top: 18px; gap: 16px; }
+  #mainPanel.active { display: flex; flex-direction: column; }
+  @media (min-width: 960px) {
+    #mainPanel.active { flex-direction: row; }
+  }
+
+  /* Info panel */
+  #infoPanel {
+    flex: 0 0 320px; background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px; max-height: 80vh; overflow-y: auto;
+    font-size: 13px; line-height: 1.6;
+  }
+  #infoPanel h3 { font-size: 15px; margin-bottom: 10px; color: var(--accent); }
+  #infoPanel .stat { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #f0f0f0; }
+  #infoPanel .stat .val { font-weight: 600; color: var(--ink); }
+  #infoPanel .section { margin-top: 14px; }
+  .block-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    background: var(--accent-soft); color: var(--accent); font-size: 12px; margin: 2px;
+  }
+
+  /* Canvas area */
+  #canvasWrap {
+    flex: 1; background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); overflow: auto; position: relative;
+    min-height: 500px;
+  }
+  #canvasWrap canvas {
+    display: block;
+  }
+  #canvasHint {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; color: var(--muted); font-size: 14px;
+    pointer-events: none;
+  }
+  #canvasHint.hidden { display: none; }
+
+  /* Stride explorer */
+  #stridePanel { margin-top: 12px; display: none; }
+  #stridePanel.active { display: block; }
+  #stridePanel label { font-size: 13px; color: var(--muted); margin-right: 8px; }
+  #stridePanel select {
+    padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+    font-size: 13px; background: var(--card);
+  }
+
+  /* Grid legend */
+  #legend { margin-top: 10px; }
+  .legend-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); flex-shrink: 0; }
+
+  /* Notice */
+  #notice { margin-top: 12px; font-size: 13px; color: var(--muted); text-align: center; display: none; }
+
+  footer { margin-top: 40px; padding: 20px 0; text-align: center; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>华为笔记 · 无界画布预览器</h1>
+  <p>PENKITINFENG 无边画布 / PENCILENGINE 有界笔记 · 实验性预览</p>
+</header>
+
+<div class="container">
+
+  <div id="dropzone">
+    <div class="icon">&#x1F4DD;</div>
+    <h2>拖入 .hinote 文件，或点击选择</h2>
+    <p>支持有界笔记（PENCILENGINE）和无界笔记（PENKITINFENG）</p>
+    <span class="btn">选择文件</span>
+    <input type="file" id="fileInput" accept=".hinote">
+  </div>
+
+  <div id="progressWrap">
+    <div class="bar"><div id="progressBar"></div></div>
+    <div id="progressText">准备中…</div>
+  </div>
+
+  <div id="notice"></div>
+
+  <div id="toolbar">
+    <div class="meta" id="metaText"></div>
+    <div class="actions">
+      <button class="btn2" id="btnOpen" style="display:none">打开文件</button>
+      <button class="btn2" id="btnReset" disabled>重置视图</button>
+      <button class="btn2" id="btnZoomOut" style="display:none">缩小</button>
+      <button class="btn2" id="btnZoomIn" style="display:none">放大</button>
+      <button class="btn2 primary" id="btnGrid" style="display:none">点阵背景</button>
+    </div>
+  </div>
+
+  <div id="mainPanel">
+    <div id="infoPanel">
+      <h3>文件信息</h3>
+      <div id="fileInfo"><div class="stat"><span>等待加载…</span><span class="val"></span></div></div>
+      <div class="section">
+        <h3>画布分块</h3>
+        <div id="blockList">暂无</div>
+      </div>
+      <div class="section">
+        <h3>笔迹统计</h3>
+        <div id="strokeStats">暂无</div>
+      </div>
+      <div id="stridePanel">
+        <label for="strideSelect">点表步长:</label>
+        <select id="strideSelect">
+          <option value="0">自动检测</option>
+          <option value="36">36 (PENCILENGINE)</option>
+          <option value="32">32</option>
+          <option value="28">28</option>
+          <option value="24">24</option>
+          <option value="20">20</option>
+          <option value="16">16</option>
+        </select>
+      </div>
+      <div class="section">
+        <h3>颜色图例</h3>
+        <div id="legend"></div>
+      </div>
+    </div>
+
+    <div id="canvasWrap">
+      <canvas id="mainCanvas"></canvas>
+      <div id="canvasHint">加载文件后在此预览</div>
+    </div>
+  </div>
+
+  <footer>Copyright &copy; Mr_Abuke</footer>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+ * 无界画布 (PENKITINFENG) + 有界笔记 (PENCILENGINE) 预览器
+ * ============================================================ */
+
+// --- Constants ---
+const PENKIT_MAGIC = "PENKITINFENG";
+const PENCIL_MAGIC = "PENCILENGINE";
+const POINT_STRIDE = 36;
+
+// 点阵背景（与有界笔记 base6 相同的间距规格）
+const DOT_GRID = { spacing: 33.0, x0: 18.0, y0: 17.0 };
+const DOT_RADIUS = 1.3;
+const DOT_COLOR = "#dddddd";
+
+// --- Utilities ---
+const fmt = v => (+v).toFixed(3).replace(/\.?0+$/, "");
+const te = new TextEncoder();
+
+function tick() { return new Promise(r => setTimeout(r, 0)); }
+
+async function inflateRaw(bytes) {
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+async function gunzip(bytes) {
+  const ds = new DecompressionStream("gzip");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function u8concat(parts) {
+  let n = 0; for (const p of parts) n += p.length;
+  const out = new Uint8Array(n); let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+// --- ZIP reader ---
+function readZip(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i > buf.length - 65558; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("不是有效的 ZIP/hinote 文件");
+  const count = dv.getUint16(eocd + 10, true);
+  let ptr = dv.getUint32(eocd + 16, true);
+  const entries = {};
+  for (let k = 0; k < count; k++) {
+    if (dv.getUint32(ptr, true) !== 0x02014b50) break;
+    const method = dv.getUint16(ptr + 10, true);
+    const compSize = dv.getUint32(ptr + 20, true);
+    const nameLen = dv.getUint16(ptr + 28, true);
+    const extraLen = dv.getUint16(ptr + 30, true);
+    const commentLen = dv.getUint16(ptr + 32, true);
+    const localOff = dv.getUint32(ptr + 42, true);
+    const name = new TextDecoder().decode(buf.subarray(ptr + 46, ptr + 46 + nameLen));
+    entries[name] = { method, compSize, localOff, name };
+    ptr += 46 + nameLen + extraLen + commentLen;
+  }
+  const files = {};
+  for (const name in entries) {
+    const e = entries[name];
+    const lh = e.localOff;
+    const nl = dv.getUint16(lh + 26, true);
+    const el = dv.getUint16(lh + 28, true);
+    const dataStart = lh + 30 + nl + el;
+    const raw = buf.slice(dataStart, dataStart + e.compSize);
+    const short = name.split("/").pop();
+    files[short] = { raw, method: e.method, fullName: name };
+  }
+  return files;
+}
+
+// --- PENKITINFENG Decoder ---
+
+function isPenkit(data) {
+  const s = new TextDecoder("ascii").decode(data.subarray(0, 12));
+  return s === PENKIT_MAGIC;
+}
+
+function isPencil(data) {
+  const s = new TextDecoder("ascii").decode(data.subarray(0, 12));
+  return s === PENCIL_MAGIC;
+}
+
+function parsePenkitHeader(data) {
+  if (data.length < 52 || !isPenkit(data)) return null;
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const u32 = o => dv.getUint32(o, false);
+  const f32 = o => dv.getFloat32(o, false);
+  
+  let color = [0, 0, 0];
+  const cRaw = u32(24);
+  if (cRaw !== 0 && cRaw !== 0xFFFFFFFF) {
+    color = [(cRaw >> 16) & 0xFF, (cRaw >> 8) & 0xFF, cRaw & 0xFF];
+  }
+  
+  return {
+    blockLength: u32(12),
+    penType: u32(16),
+    sequenceId: u32(20),
+    colorRaw: cRaw,
+    color: color,
+    baseWidth: 4.0,
+    stride: 28,
+  };
+}
+
+function decodePenkitStrokes(data, requestedStride) {
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const f32 = o => dv.getFloat32(o, false);
+  const u32_be = o => dv.getUint32(o, false);
+  const u32_le = o => dv.getUint32(o, true);
+  const strokes = [];
+  const HEADER = 100;
+  const stride = 28;
+
+  let blockColor = [30, 64, 175];
+  if (data.length >= 28) {
+    const cRaw = u32_be(24);
+    if (cRaw !== 0 && cRaw !== 0xFFFFFFFF) {
+      blockColor = [(cRaw >> 16) & 0xFF, (cRaw >> 8) & 0xFF, cRaw & 0xFF];
+    }
+  }
+
+  for (let off = HEADER; off < data.length - 12; off += 4) {
+    // 1. Try Big-Endian table pattern [count, 28, 0]
+    const cnt_be = u32_be(off);
+    const st_be = u32_be(off + 4);
+    const z_be = u32_be(off + 8);
+    if (cnt_be >= 2 && cnt_be <= 16384 && st_be === stride && z_be === 0) {
+      const ptsStart = off + 12;
+      if (ptsStart + cnt_be * stride <= data.length) {
+        const minX = f32(ptsStart + 4);
+        const minY = f32(ptsStart + 8);
+        const maxX = f32(ptsStart + 12);
+        const maxY = f32(ptsStart + 16);
+
+        const pts = [];
+        const pressures = [];
+        for (let ri = 1; ri < cnt_be; ri++) {
+          const ro = ptsStart + ri * stride;
+          const x = f32(ro + 17);
+          const y = f32(ro + 21);
+          const pRaw = f32(ro + 1);
+          const p = (Number.isFinite(pRaw) && pRaw >= 0.01 && pRaw <= 2.0) ? pRaw : 0.5;
+          if (Number.isFinite(x) && Number.isFinite(y)) {
+            pts.push([x, y]);
+            pressures.push(p);
+          }
+        }
+        if (pts.length >= 2) {
+          strokes.push({
+            points: pts,
+            pressures: pressures,
+            bbox: [minX, minY, maxX, maxY],
+            color: blockColor,
+            baseWidth: 4.0,
+            opacity: 1.0,
+            isLe: false
+          });
+        }
+      }
+    }
+
+    // 2. Try Little-Endian table pattern [count, 28, z != 0]
+    const cnt_le = u32_le(off);
+    const st_le = u32_le(off + 4);
+    const z_le = u32_le(off + 8);
+    if (cnt_le >= 2 && cnt_le <= 16384 && st_le === stride && z_le !== 0) {
+      const ptsStart = off + 12;
+      if (ptsStart + cnt_le * stride <= data.length) {
+        const pts = [];
+        const pressures = [];
+        for (let ri = 1; ri < cnt_le; ri++) {
+          const ro = ptsStart + ri * stride;
+          const x = f32(ro + 14);
+          const y = f32(ro + 18);
+          const pRaw = f32(ro + 16);
+          const p = (Number.isFinite(pRaw) && pRaw >= 0.01 && pRaw <= 2.0) ? pRaw : 0.5;
+          if (Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) < 100000 && Math.abs(y) < 100000) {
+            pts.push([x, y]);
+            pressures.push(p);
+          }
+        }
+        if (pts.length >= 2) {
+          const xs = pts.map(p => p[0]);
+          const ys = pts.map(p => p[1]);
+          strokes.push({
+            points: pts,
+            pressures: pressures,
+            bbox: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+            color: blockColor,
+            baseWidth: 4.0,
+            opacity: 1.0,
+            isLe: true
+          });
+        }
+      }
+    }
+  }
+
+  return strokes;
+}
+
+// --- PENCILENGINE Decoder (adapted from main viewer) ---
+
+function parsePencilEngine(data) {
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const u32 = o => dv.getUint32(o, false);
+  const f32 = o => dv.getFloat32(o, false);
+  if (!isPencil(data)) return [];
+  const strokes = [];
+  const finite = v => Number.isFinite(v) && -100000 < v && v < 100000;
+
+  for (let off = 60; off < data.length - 16; off += 4) {
+    const prefix = u32(off), count = u32(off + 4), stride = u32(off + 8), resv = u32(off + 12);
+    if (!(prefix === 0 || prefix === 2) || count < 2 || count > 16384 || stride !== POINT_STRIDE || resv !== 0) continue;
+    const ptsEnd = off + 16 + count * stride;
+    if (ptsEnd > data.length) continue;
+
+    const points = [], pressures = [];
+    let bad = false;
+    for (let i = 0; i < count; i++) {
+      const po = off + 16 + i * stride;
+      const x = f32(po + 4), y = f32(po + 8), p = f32(po + 16);
+      if (!finite(x) || !finite(y)) { bad = true; break; }
+      points.push([x, y]);
+      pressures.push(Number.isFinite(p) && p > 0 ? p : 0);
+    }
+    if (bad || points.length < 2) continue;
+    const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
+    if (Math.max(...xs) === Math.min(...xs) && Math.max(...ys) === Math.min(...ys)) continue;
+
+    if (pressures.some(p => p > 0)) {
+      let last = pressures.find(p => p > 0);
+      for (let i = 0; i < pressures.length; i++) {
+        if (pressures[i] === 0) pressures[i] = last; else last = pressures[i];
+      }
+    } else pressures.fill(0.2);
+
+    const so = off - 60;
+    let baseWidth = f32(so + 40);
+    if (!Number.isFinite(baseWidth) || baseWidth <= 0 || baseWidth > 100) baseWidth = 4.0;
+    const penType = u32(so + 12);
+    if (![1, 2, 3, 5].includes(penType)) continue;
+    const colorValue = u32(so + 8);
+    let color, opacity;
+    if (colorValue !== 0 && colorValue !== 0xFFFFFFFF) {
+      color = [(colorValue >> 16) & 0xFF, (colorValue >> 8) & 0xFF, colorValue & 0xFF];
+      opacity = 1.0;
+    } else {
+      const comps = [f32(so + 20), f32(so + 24), f32(so + 28)];
+      if (comps.every(c => Number.isFinite(c) && 0 <= c && c <= 1) && comps.some(c => c > 0)) {
+        const flag = u32(so + 4);
+        const isNew = flag === 0x01000000 || flag === 0x01010000;
+        const ordered = (penType === 5 || !isNew) ? [...comps].reverse() : comps;
+        color = ordered.map(c => Math.round(c * 255));
+        if (penType === 5) opacity = 0.35;
+        else opacity = 1.0;
+      } else { color = [0, 0, 0]; opacity = 1.0; }
+    }
+    strokes.push({ points, pressures, baseWidth, color, opacity, penType });
+  }
+  return strokes;
+}
+
+// --- SVG generation (for bounded notes) ---
+
+function svgDocument(title, w, h, bg, strokes) {
+  const parts = [];
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(w)}" height="${fmt(h)}" viewBox="0 0 ${fmt(w)} ${fmt(h)}">`);
+  parts.push(`<rect width="${fmt(w)}" height="${fmt(h)}" fill="${bg}"/>`);
+
+  // Thumbnail-style strokes (simplified)
+  for (const s of strokes) {
+    const pts = s.points;
+    if (pts.length < 2) continue;
+    const c = "#" + s.color.map(v => v.toString(16).padStart(2, "0")).join("");
+    let d = `M ${fmt(pts[0][0])} ${fmt(pts[0][1])}`;
+    for (let i = 1; i < pts.length; i++) d += ` L ${fmt(pts[i][0])} ${fmt(pts[i][1])}`;
+    const w2 = Math.max(0.5, s.baseWidth * 0.5);
+    parts.push(`<path d="${d}" stroke="${c}" stroke-width="${fmt(w2)}" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="${fmt(s.opacity)}"/>`);
+  }
+  parts.push("</svg>");
+  return parts.join("\n");
+}
+
+/* 绘制点阵背景（与有界笔记 base6 相同的间距）*/
+function drawDotGrid(ctx, blocks, minGx, minGy, gridScale) {
+  const spacing = DOT_GRID.spacing;
+  const x0 = DOT_GRID.x0;
+  const y0 = DOT_GRID.y0;
+  const radius = DOT_RADIUS;
+  const pageSize = 1000;
+  const scale = gridScale / pageSize;
+  const dotSpacingPx = spacing * scale;
+  const dotRadiusPx = Math.max(0.6, radius * scale);
+
+  ctx.fillStyle = DOT_COLOR;
+  for (const b of blocks) {
+    const cellOriginX = (b.gridX - minGx) * gridScale;
+    const cellOriginY = (b.gridY - minGy) * gridScale;
+
+    for (let py = y0; py < pageSize; py += spacing) {
+      for (let px = x0; px < pageSize; px += spacing) {
+        ctx.beginPath();
+        ctx.arc(cellOriginX + px * scale, cellOriginY + py * scale, dotRadiusPx, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+/* 点阵背景显示状态 */
+let showDotGrid = true;
+
+// --- Zoom / Pan state ---
+let zoomLevel = 1.0, viewX = 0, viewY = 0;
+let isDragging = false, dragStartX = 0, dragStartY = 0;
+let dragViewStartX = 0, dragViewStartY = 0;
+const MIN_ZOOM = 0.15, MAX_ZOOM = 8.0;
+const GRID_SCALE = 120; // base pixels per grid unit
+
+function renderCanvas(ctx, discovered, stride) {
+  const cv = ctx.canvas;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = "#f8f9fa";
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  if (!discovered.length) {
+    ctx.fillStyle = "#999";
+    ctx.font = "14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("未发现可渲染的笔迹", cv.width / 2, cv.height / 2);
+    return null;
+  }
+
+  // Pre-decode all strokes and calculate global bounding box
+  let globalMinX = Infinity, globalMaxX = -Infinity;
+  let globalMinY = Infinity, globalMaxY = -Infinity;
+  let totalStrokesCount = 0;
+
+  const allBlockStrokes = [];
+  for (const b of discovered) {
+    const strokes = decodePenkitStrokes(b.data, stride);
+    allBlockStrokes.push({ block: b, strokes });
+    totalStrokesCount += strokes.length;
+    for (const s of strokes) {
+      for (const p of s.points) {
+        if (p[0] < globalMinX) globalMinX = p[0];
+        if (p[0] > globalMaxX) globalMaxX = p[0];
+        if (p[1] < globalMinY) globalMinY = p[1];
+        if (p[1] > globalMaxY) globalMaxY = p[1];
+      }
+    }
+  }
+
+  // Apply zoom + pan transform
+  ctx.save();
+  ctx.setTransform(zoomLevel, 0, 0, zoomLevel, viewX, viewY);
+
+  // --- Grid lines ---
+  // Draw grid cells around populated blocks (1000 x 1000 per cell)
+  const WORLD_GRID = 1000.0;
+  ctx.strokeStyle = "#cbd5e1";
+  ctx.lineWidth = 1.0 / zoomLevel;
+
+  for (const item of allBlockStrokes) {
+    const b = item.block;
+    const gx = b.gridX * WORLD_GRID;
+    const gy = b.gridY * WORLD_GRID;
+
+    ctx.fillStyle = "rgba(241, 245, 249, 0.4)";
+    ctx.fillRect(gx, gy, WORLD_GRID, WORLD_GRID);
+    ctx.strokeRect(gx, gy, WORLD_GRID, WORLD_GRID);
+
+    // Block label
+    ctx.fillStyle = "#64748b";
+    ctx.font = `${Math.max(12, 16 / Math.sqrt(zoomLevel))}px sans-serif`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(`Grid (${b.gridX}, ${b.gridY})`, gx + 16, gy + 16);
+  }
+
+  // --- Dot grid background ---
+  if (showDotGrid && Number.isFinite(globalMinX)) {
+    ctx.fillStyle = "#94a3b8";
+    const dotStep = 33.0;
+    const startX = Math.floor(globalMinX / dotStep - 4) * dotStep;
+    const endX = Math.ceil(globalMaxX / dotStep + 4) * dotStep;
+    const startY = Math.floor(globalMinY / dotStep - 4) * dotStep;
+    const endY = Math.ceil(globalMaxY / dotStep + 4) * dotStep;
+    const r = Math.max(0.7, 1.2 / Math.sqrt(zoomLevel));
+
+    for (let y = startY; y <= endY; y += dotStep) {
+      for (let x = startX; x <= endX; x += dotStep) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // --- Render Strokes ---
+  const legend = [];
+  for (const item of allBlockStrokes) {
+    const b = item.block;
+    const strokes = item.strokes;
+    let bColorHex = "#1e40af";
+
+    for (const s of strokes) {
+      const cHex = "#" + s.color.map(v => v.toString(16).padStart(2, "0")).join("");
+      bColorHex = cHex;
+      ctx.strokeStyle = cHex;
+      ctx.fillStyle = cHex;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.globalAlpha = s.opacity || 1.0;
+
+      const pts = s.points;
+      const prs = s.pressures || [];
+      if (pts.length < 2) continue;
+
+      const baseW = (s.baseWidth || 4.0) / Math.sqrt(zoomLevel);
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        const p1 = pts[i];
+        const p2 = pts[i + 1];
+        const press = prs[i] || 0.5;
+        const segW = Math.max(1.0, baseW * press * 1.6);
+
+        ctx.beginPath();
+        ctx.lineWidth = segW;
+        ctx.moveTo(p1[0], p1[1]);
+        ctx.lineTo(p2[0], p2[1]);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1.0;
+    legend.push({ gridX: b.gridX, gridY: b.gridY, color: bColorHex, file: b.name, count: strokes.length });
+  }
+
+  ctx.restore();
+
+  // --- Overlay: zoom & status indicator ---
+  ctx.fillStyle = "rgba(15, 23, 42, 0.75)";
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(cv.width - 240, 12, 228, 32, 8);
+    ctx.fill();
+  } else {
+    ctx.fillRect(cv.width - 240, 12, 228, 32);
+  }
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "12px -apple-system, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(`${Math.round(zoomLevel * 100)}% · 共 ${totalStrokesCount} 笔 · 滚轮缩放/拖拽`, cv.width - 126, 28);
+
+  return { legend, globalMinX, globalMaxX, globalMinY, globalMaxY, totalStrokesCount };
+}
+
+// --- UI ---
+const $ = id => document.getElementById(id);
+let PENCIL_PAGES = [];
+let SVG_CACHE = [];
+let PENKIT_BLOCKS = [];
+let PENCIL_MODE = false;
+let ARCHIVE_NAME = "note";
+
+function setProgress(pct, text) {
+  $("progressWrap").style.display = "block";
+  $("progressBar").style.width = pct + "%";
+  if (text) $("progressText").textContent = text;
+  return tick();
+}
+function notice(msg) { const n = $("notice"); n.style.display = "block"; n.textContent = msg; }
+
+async function processFile(file) {
+  $("mainPanel").classList.remove("active");
+  $("toolbar").style.display = "none";
+  $("notice").style.display = "none";
+  $("stridePanel").classList.remove("active");
+  PENCIL_PAGES = []; SVG_CACHE = []; PENKIT_BLOCKS = []; PENCIL_MODE = false;
+  ARCHIVE_NAME = file.name.replace(/\.hinote$/i, "");
+
+  try {
+    await setProgress(2, "读取文件…");
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const zipEntries = readZip(buf);
+    await setProgress(10, "解压容器…");
+
+    const files = {};
+    const names = Object.keys(zipEntries);
+    let di = 0;
+    for (const name of names) {
+      const e = zipEntries[name];
+      files[name] = {
+        _raw: e.raw, _method: e.method, _bytes: null,
+        async bytes() {
+          if (!this._bytes) this._bytes = this._method === 8 ? await inflateRaw(this._raw) : this._raw;
+          return this._bytes;
+        }
+      };
+      di++;
+      if (di % 30 === 0) await setProgress(10 + Math.round(8 * di / names.length), `解压 ${di}/${names.length}…`);
+    }
+
+    await setProgress(20, "分析文件结构…");
+
+    // Check for PENKITINFENG blocks vs PENCILENGINE
+    let penkitCount = 0, pencilCount = 0;
+    const penkitBlocks = [];
+    for (const name of names) {
+      const raw = await files[name].bytes();
+      if (isPenkit(raw) && /^bsd_(-?\d+)_(-?\d+)_/.test(name)) {
+        penkitCount++;
+        const m = name.match(/^bsd_(-?\d+)_(-?\d+)_/);
+        penkitBlocks.push({ name, data: raw, gridX: parseInt(m[1]), gridY: parseInt(m[2]) });
+      } else if (isPencil(raw)) {
+        pencilCount++;
+      }
+    }
+
+    if (penkitCount > 0 && penkitCount >= pencilCount) {
+      // Infinite canvas mode
+      PENCIL_MODE = false;
+      PENKIT_BLOCKS = penkitBlocks;
+      await renderInfiniteView(file, zipEntries, files, penkitBlocks);
+    } else if (pencilCount > 0) {
+      // Bounded note mode
+      PENCIL_MODE = true;
+      await renderBoundedView(file, zipEntries, files);
+    } else {
+      notice("未找到可识别的笔迹格式（PENCILENGINE 或 PENKITINFENG）。");
+      return;
+    }
+
+  } catch (err) {
+    console.error(err);
+    notice("解析失败：" + err.message);
+    $("progressWrap").style.display = "none";
+  }
+}
+
+async function renderBoundedView(file, zipEntries, files) {
+  await setProgress(25, "解析页面元数据…");
+  const names = Object.keys(zipEntries);
+  const pageDatas = [];
+  for (const name of names) {
+    if (zipEntries[name].fullName.startsWith("pages/") && zipEntries[name].fullName.endsWith(".jhinote")) {
+      const raw = await files[name].bytes();
+      const jsonBytes = await gunzip(raw);
+      const obj = JSON.parse(new TextDecoder().decode(jsonBytes));
+      pageDatas.push(obj.customNotePageContent || obj);
+    }
+  }
+  pageDatas.sort((a, b) => (a.pageNumber || 0) - (b.pageNumber || 0));
+
+  for (let i = 0; i < pageDatas.length; i++) {
+    await setProgress(30 + Math.round(30 * (i + 1) / pageDatas.length), `解析页面 ${i + 1}/${pageDatas.length}…`);
+    const pd = pageDatas[i];
+    const ratio = pd.pageRatio || 0.706;
+    const w = 1000;
+    const h = pd.pageOrientation === 1 ? 1000 * ratio : 1000 / ratio;
+    const bgColor = "#" + ((pd.pageColor ?? -1) >>> 0).toString(16).padStart(8, "0").slice(2);
+
+    const strokes = [];
+    for (const att of (pd.attachment || [])) {
+      const short = (att.filePath || "").split(/[\\/]/).pop();
+      const entry = files[short];
+      if (!entry) continue;
+      const data = await entry.bytes();
+      if (isPencil(data)) strokes.push(...parsePencilEngine(data));
+    }
+
+    if (strokes.length) {
+      const num = pd.pageNumber || 0;
+      PENCIL_PAGES.push({ number: num, width: w, height: h, background: bgColor, strokes });
+      SVG_CACHE.push(svgDocument(`${ARCHIVE_NAME}: page-${num}`, w, h, bgColor, strokes));
+    }
+  }
+
+  if (!PENCIL_PAGES.length) {
+    notice("未找到可渲染的有界页面。");
+    return;
+  }
+
+  renderBoundedGrid();
+  document.body.classList.add("loaded");
+  $("btnOpen").style.display = "";
+  $("toolbar").style.display = "flex";
+  $("metaText").innerHTML = `<b>${file.name}</b> · ${PENCIL_PAGES.length} 页 · 有界笔记 (PENCILENGINE)`;
+  await setProgress(100, `完成：${PENCIL_PAGES.length} 页`);
+  setTimeout(() => { $("progressWrap").style.display = "none"; }, 800);
+}
+
+function renderBoundedGrid() {
+  const panel = $("mainPanel");
+  panel.innerHTML = `
+    <div style="flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;padding:4px;">
+      ${PENCIL_PAGES.map((p, i) => `
+        <div style="background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;">
+          <div style="width:100%;aspect-ratio:${fmt(p.width)}/${fmt(p.height)};background:#fff;">
+            ${SVG_CACHE[i]}
+          </div>
+          <div style="padding:8px 12px;font-size:12px;color:var(--muted);border-top:1px solid var(--line);">
+            第 ${p.number} 页 · ${p.strokes.length} 笔
+          </div>
+        </div>
+      `).join("")}
+    </div>`;
+  panel.classList.add("active");
+}
+
+async function renderInfiniteView(file, zipEntries, files, penkitBlocks) {
+  await setProgress(25, "解析画布元数据…");
+
+  // Read page metadata for thumbnail_area
+  const names = Object.keys(zipEntries);
+  let thumbnailArea = "";
+  for (const name of names) {
+    if (zipEntries[name].fullName.startsWith("pages/") && zipEntries[name].fullName.endsWith(".jhinote")) {
+      const raw = await files[name].bytes();
+      const jsonBytes = await gunzip(raw);
+      const obj = JSON.parse(new TextDecoder().decode(jsonBytes));
+      const pc = obj.customNotePageContent || obj;
+      try {
+        const d1 = JSON.parse(pc.data1 || "{}");
+        if (d1.thumbnail_area) { thumbnailArea = d1.thumbnail_area; break; }
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  await setProgress(40, `发现 ${penkitBlocks.length} 个 PENKITINFENG 分块…`);
+
+  // Determine stride
+  let detectedStride = 0;
+  for (const b of penkitBlocks) {
+    const hdr = parsePenkitHeader(b.data);
+    if (hdr && hdr.stride > 0 && hdr.stride < 100) {
+      detectedStride = hdr.stride;
+      break;
+    }
+  }
+
+  // Populate info panel
+  const infoHtml = [];
+  infoHtml.push(`<div class="stat"><span>笔记类型</span><span class="val">无边画布 (PENKITINFENG)</span></div>`);
+  infoHtml.push(`<div class="stat"><span>文件大小</span><span class="val">${(file.size / 1024 / 1024).toFixed(2)} MB</span></div>`);
+  infoHtml.push(`<div class="stat"><span>分块数量</span><span class="val">${penkitBlocks.length}</span></div>`);
+  infoHtml.push(`<div class="stat"><span>检测步长</span><span class="val">${detectedStride || "未知"}</span></div>`);
+  infoHtml.push(`<div class="stat"><span>点阵间距</span><span class="val">${DOT_GRID.spacing} 单位</span></div>`);
+  infoHtml.push(`<div class="stat"><span>可视区域</span><span class="val">${thumbnailArea || "未知"}</span></div>`);
+
+  // Block list
+  const blockHtml = penkitBlocks
+    .sort((a, b) => a.gridY - b.gridY || a.gridX - b.gridX)
+    .map(b => {
+      const hdr = parsePenkitHeader(b.data);
+      const info = hdr ? `步长=${hdr.stride} 笔宽=${hdr.baseWidth.toFixed(1)} 类型=${hdr.penType}` : "头部解析失败";
+      return `<span class="block-badge" title="${info}">(${b.gridX},${b.gridY}) ${(b.data.length / 1024).toFixed(0)}KB</span>`;
+    }).join("");
+
+  $("fileInfo").innerHTML = infoHtml.join("\n");
+  $("blockList").innerHTML = blockHtml || "无";
+
+  // Set up stride selector
+  const strideSel = $("strideSelect");
+  strideSel.value = detectedStride > 0 ? String(detectedStride) : "0";
+  if (detectedStride > 0) {
+    // Add detected stride to options if not present
+    if (![...strideSel.options].some(o => o.value === String(detectedStride))) {
+      const opt = document.createElement("option");
+      opt.value = String(detectedStride);
+      opt.textContent = `${detectedStride} (检测)`;
+      strideSel.appendChild(opt);
+    }
+  }
+  $("stridePanel").classList.add("active");
+
+  // Render canvas
+  const canvas = $("mainCanvas");
+  const wrap = $("canvasWrap");
+  const canvasW = Math.max(600, wrap.clientWidth - 4);
+  const canvasH = Math.max(500, wrap.clientHeight - 4);
+  canvas.width = canvasW;
+  canvas.height = canvasH;
+  const ctx = canvas.getContext("2d");
+  $("canvasHint").classList.add("hidden");
+
+  const stride = 28;
+
+  // Initial draw to compute global bounding box
+  zoomLevel = 1.0;
+  viewX = 0;
+  viewY = 0;
+  const renderResult = renderCanvas(ctx, penkitBlocks, stride);
+
+  if (renderResult && Number.isFinite(renderResult.globalMinX)) {
+    const minX = renderResult.globalMinX, maxX = renderResult.globalMaxX;
+    const minY = renderResult.globalMinY, maxY = renderResult.globalMaxY;
+    const strokeW = Math.max(100, maxX - minX);
+    const strokeH = Math.max(100, maxY - minY);
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    const fitZoom = Math.min((canvasW - 80) / strokeW, (canvasH - 80) / strokeH);
+    zoomLevel = Math.max(0.2, Math.min(2.5, fitZoom));
+    viewX = canvasW / 2 - centerX * zoomLevel;
+    viewY = canvasH / 2 - centerY * zoomLevel;
+
+    // Redraw with auto-fitted viewport
+    renderCanvas(ctx, penkitBlocks, stride);
+  }
+
+  // Update legend
+  const legendEl = $("legend");
+  if (renderResult && renderResult.legend) {
+    legendEl.innerHTML = renderResult.legend.map(l =>
+      `<div class="legend-row"><span class="legend-swatch" style="background:${l.color}"></span>` +
+      `<span>Grid (${l.gridX}, ${l.gridY}) — ${l.count} 笔迹</span></div>`
+    ).join("");
+  }
+
+  // Register zoom/pan mouse events
+  setupCanvasInteraction(canvas, ctx, stride);
+
+  // UI setup
+  document.body.classList.add("loaded");
+  $("btnOpen").style.display = "";
+  $("btnReset").disabled = false;
+  $("toolbar").style.display = "flex";
+  $("btnGrid").style.display = "";
+  $("btnZoomOut").style.display = "";
+  $("btnZoomIn").style.display = "";
+  $("metaText").innerHTML = `<b>${file.name}</b> · ${penkitBlocks.length} 个 PENKITINFENG 分块`;
+  $("mainPanel").classList.add("active");
+  await setProgress(100, `完成：${penkitBlocks.length} 个分块`);
+  setTimeout(() => { $("progressWrap").style.display = "none"; }, 800);
+
+  // Stride change handler
+  strideSel.onchange = () => {
+    const s = parseInt(strideSel.value) || 28;
+    const result = renderCanvas(ctx, penkitBlocks, s);
+    if (result && result.legend) {
+      legendEl.innerHTML = result.legend.map(l =>
+        `<div class="legend-row"><span class="legend-swatch" style="background:${l.color}"></span>` +
+        `<span>(${l.gridX}, ${l.gridY}) — ${l.file}</span></div>`
+      ).join("");
+    }
+  };
+}
+
+/* 画布交互：缩放 + 拖拽 */
+function setupCanvasInteraction(canvas, ctx, stride) {
+  const reRender = () => renderCanvas(ctx, PENKIT_BLOCKS, stride);
+
+  // Mouse drag for pan
+  canvas.onmousedown = e => {
+    isDragging = true;
+    dragStartX = e.clientX; dragStartY = e.clientY;
+    dragViewStartX = viewX; dragViewStartY = viewY;
+    canvas.style.cursor = "grabbing";
+  };
+  canvas.onmousemove = e => {
+    if (!isDragging) return;
+    viewX = dragViewStartX + (e.clientX - dragStartX);
+    viewY = dragViewStartY + (e.clientY - dragStartY);
+    reRender();
+  };
+  canvas.onmouseup = () => { isDragging = false; canvas.style.cursor = "grab"; };
+  canvas.onmouseleave = () => { isDragging = false; canvas.style.cursor = "default"; };
+  canvas.style.cursor = "grab";
+
+  // Wheel zoom
+  canvas.onwheel = e => {
+    e.preventDefault();
+    const oldZoom = zoomLevel;
+    const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
+    zoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel * factor));
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    viewX = mx - (mx - viewX) * zoomLevel / oldZoom;
+    viewY = my - (my - viewY) * zoomLevel / oldZoom;
+    reRender();
+  };
+
+  // Window resize → redraw
+  const onResize = () => {
+    const wrap = canvas.parentElement;
+    canvas.width = Math.max(600, wrap.clientWidth - 4);
+    canvas.height = Math.max(500, wrap.clientHeight - 4);
+    reRender();
+  };
+  window.addEventListener("resize", onResize);
+}
+
+// --- Event bindings ---
+const dz = $("dropzone"), fi = $("fileInput");
+dz.onclick = () => fi.click();
+$("btnOpen").onclick = () => fi.click();
+fi.onchange = e => { if (e.target.files[0]) processFile(e.target.files[0]); };
+dz.ondragover = e => { e.preventDefault(); dz.classList.add("drag"); };
+dz.ondragleave = () => dz.classList.remove("drag");
+dz.ondrop = e => {
+  e.preventDefault(); dz.classList.remove("drag");
+  const f = e.dataTransfer.files[0];
+  if (f) processFile(f);
+};
+$("btnReset").onclick = () => {
+  $("mainPanel").classList.remove("active");
+  $("toolbar").style.display = "none";
+  document.body.classList.remove("loaded");
+  PENCIL_PAGES = []; SVG_CACHE = []; PENKIT_BLOCKS = []; PENCIL_MODE = false;
+};
+
+/* 点阵背景切换 */
+$("btnGrid").onclick = () => {
+  showDotGrid = !showDotGrid;
+  const btn = $("btnGrid");
+  btn.classList.toggle("primary", showDotGrid);
+  btn.textContent = showDotGrid ? "点阵背景" : "隐藏背景";
+  if (PENKIT_BLOCKS.length > 0 && $("mainPanel").classList.contains("active")) {
+    const canvas = $("mainCanvas");
+    const ctx = canvas.getContext("2d");
+    const stride = parseInt($("strideSelect").value) || 28;
+    renderCanvas(ctx, PENKIT_BLOCKS, stride);
+  }
+};
+
+/* 缩放控制 */
+$("btnZoomIn").onclick = () => {
+  zoomLevel = Math.min(MAX_ZOOM, zoomLevel * 1.4);
+  const canvas = $("mainCanvas");
+  if (canvas) renderCanvas(canvas.getContext("2d"), PENKIT_BLOCKS, parseInt($("strideSelect").value) || 28);
+};
+$("btnZoomOut").onclick = () => {
+  zoomLevel = Math.max(MIN_ZOOM, zoomLevel / 1.4);
+  const canvas = $("mainCanvas");
+  if (canvas) renderCanvas(canvas.getContext("2d"), PENKIT_BLOCKS, parseInt($("strideSelect").value) || 28);
+};
+</script>
+</body>
+</html>
