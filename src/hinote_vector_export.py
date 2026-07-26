@@ -11,6 +11,8 @@ import json
 import math
 import re
 import struct
+import subprocess
+import sys
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -1001,7 +1003,12 @@ def build_page(page_data: dict, files: dict[str, bytes], bkg_map: dict[str, str]
     )
 
 
-def export_archive(archive_path: Path, output_root: Path) -> Path:
+def export_archive(
+    archive_path: Path,
+    output_root: Path,
+    ppi: float = 0,
+    paper: str = "a4",
+) -> Path:
     destination = output_root / archive_path.stem
     raw = destination / "raw"
     svg_dir = destination / "svg"
@@ -1044,6 +1051,30 @@ def export_archive(archive_path: Path, output_root: Path) -> Path:
 
     if pages:
         write_pdf(destination / f"{archive_path.stem}.pdf", pages)
+    if ppi > 0 and pages:
+        try:
+            import cairosvg
+            pw, ph = paper_size(paper, ppi)
+            sx = pw / max(p.width for p in pages)
+            sy = ph / max(p.height for p in pages)
+            scale = min(sx, sy)
+            png_dir = destination / "png"
+            png_dir.mkdir(parents=True, exist_ok=True)
+            for page in pages:
+                svg_path = svg_dir / f"{page.name}.svg"
+                png_path = png_dir / f"{page.name}.png"
+                w = round(page.width * scale)
+                h = round(page.height * scale)
+                svg_text = svg_path.read_text(encoding="utf-8")
+                cairosvg.svg2png(
+                    bytestring=svg_text.encode("utf-8"),
+                    write_to=str(png_path),
+                    output_width=w,
+                    output_height=h,
+                )
+                print(f"    {png_path.name}  {w}x{h}  @{ppi:.0f}ppi")
+        except ImportError:
+            print("  cairosvg not installed, skipping PNG export")
     land = sum(1 for p in pages if p.width > p.height)
     lines = [f"# {archive_path.name} 矢量导出", "", f"- 已导出完整页面：{len(pages)}"]
     if pages:
@@ -1056,13 +1087,40 @@ def export_archive(archive_path: Path, output_root: Path) -> Path:
     return destination
 
 
+PAPER_SIZES = {
+    "a4": (210, 297),
+    "a3": (297, 420),
+    "a5": (148, 210),
+    "letter": (215.9, 279.4),
+    "legal": (215.9, 355.6),
+}
+
+
+def paper_size(name: str, ppi: float) -> tuple[int, int]:
+    """Convert a paper size name + PPI to pixel dimensions (width, height)."""
+    key = name.lower().replace("-", "").replace("_", "")
+    if key in PAPER_SIZES:
+        mm_w, mm_h = PAPER_SIZES[key]
+        return (round(mm_w * ppi / 25.4), round(mm_h * ppi / 25.4))
+    if "x" in name:
+        parts = name.split("x")
+        return (int(parts[0]), int(parts[1]))
+    raise ValueError(f"Unknown paper size: {name}")
+
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archives", nargs="+", type=Path)
     parser.add_argument("-o", "--output", type=Path, default=Path("out"))
+    parser.add_argument("--ppi", type=float, default=0, help="Export PNG at this PPI (e.g. 300)")
+    parser.add_argument(
+        "--size", type=str, default="a4",
+        help='Paper size: a4/a3/a5/letter/legal or WxH (default a4)',
+    )
     args = parser.parse_args()
     for archive in args.archives:
-        print(export_archive(archive, args.output))
+        print(export_archive(archive, args.output, args.ppi, args.size))
 
 
 if __name__ == "__main__":
