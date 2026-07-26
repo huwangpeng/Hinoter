@@ -1,6 +1,3 @@
-# 写在前面
-## 作为华为MatePad11''5s 2024 柔光版首发用户，我对华为笔记这款软件的使用十分满意，除了这一点，它的PDF导出并不能导出矢量图形，而是和导出图片一样，导出几张和你的平板分辨率相同的图片，当放大去看时，笔迹大量失真，我已经提交过多次建议却没有进行更新，故开发此项目，仅供大家学习参考使用
-
 # 华为笔记 `.hinote` 解析与矢量导出工具
 
 解析华为笔记 `.hinote` 文件格式，将手写笔迹、文本、图片和背景模板还原为矢量 SVG / PDF。
@@ -16,11 +13,6 @@ hinoter/
 ├── docs/                         # 格式文档
 │   ├── HINOTE_FORMAT.md          # 格式逆向文档
 │   └── 解析结果.md               # 初步解析记录
-├── tools/                        # 辅助工具 & 测试
-│   ├── check_final.py            # 渲染正确性验证
-│   ├── _grid_detect.py           # 背景网格间距检测
-│   └── _test_web.mjs             # 网页核心逻辑测试
-├── out/                          # 导出产物（SVG/PDF）— 不提交
 ├── README.md
 └── .gitignore
 ```
@@ -28,7 +20,7 @@ hinoter/
 ## Python 导出
 
 ```powershell
-python src/hinote_vector_export.py "samples/有界.hinote"
+python src/hinote_vector_export.py "Your File.hinote"
 ```
 
 结果写入 `out/<文件名>/`：
@@ -46,13 +38,12 @@ python src/hinote_vector_export.py "samples/有界.hinote"
 直接打开 `web/hinote-viewer.html` 即可使用：
 
 - 拖入 `.hinote` 文件或点击选择
-- **全部计算在浏览器本地完成**，不上传任何数据
 - 支持笔迹、文本、图片、背景网格的 SVG 预览
 - 可下载单页 SVG 和汇总 PDF
 - 带进度条和响应式设计
 - **横/纵向自适应**：缩略图按页面真实宽高比渲染；当笔记以横向（landscape）为主时自动进入「横向视图」（水平滚动、按视口高度适配宽屏），也可用「横向视图 / 网格视图」按钮手动切换；大图预览同时适配横向与纵向页面。
 
-## 已支持的格式特性
+## 支持的格式特性
 
 - **有界笔记 (PENCILENGINE)**：笔迹、文本框、图片、背景模板
 - **导入页背景**：以 PDF 为底（`*_pdf`，抽取内嵌 JPEG）/ 以图像为底（`*_image`），按 `bkgAttachmentId`+`bkgAttachmentIndex` 还原满页背景层，笔迹叠在其上
