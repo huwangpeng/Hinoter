@@ -101,6 +101,10 @@
     display: flex; justify-content: space-between; border-top: 1px solid var(--line);
   }
   .page-card .label .ori { color: var(--accent); font-weight: 600; }
+  .page-card .label .sel { display: flex; align-items: center; gap: 6px; }
+  .page-card .label .sel input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  #selectBar { display: none; margin-top: 14px; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+  #selectBar .btn2 { padding: 4px 12px; font-size: 12px; }
 
   /* 文件加载后收起 dropzone，腾出垂直空间给页面预览 */
   body.loaded #dropzone { display: none; }
@@ -181,6 +185,13 @@
         <button class="btn2" id="btnPng" disabled>导出 PNG</button>
       </div>
     </div>
+  </div>
+
+  <div id="selectBar">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" id="selectAll" checked> <span>全选</span>
+    </label>
+    <span id="selCount" style="font-size:13px;color:var(--muted)"></span>
   </div>
 
   <div id="grid"></div>
@@ -993,21 +1004,38 @@ function renderGrid() {
   PAGES.forEach((page, i) => {
     const card = document.createElement("div");
     card.className = "page-card";
-    // 用页面真实宽高比驱动缩略图，避免横向页被拉伸成纵向
     card.style.setProperty("--ar", `${page.width} / ${page.height}`);
     const ori = page.isLandscape ? '<span class="ori">横向</span>' : "纵向";
     card.innerHTML = `<div class="thumb">${SVG_CACHE[i]}</div>
-      <div class="label"><span>第 ${page.number} 页 · ${ori}</span><span>${page.strokes.length} 笔</span></div>`;
-    card.onclick = () => { $("modalBox").innerHTML = SVG_CACHE[i]; $("modal").classList.add("open"); };
+      <div class="label"><span>第 ${page.number} 页 · ${ori}</span>
+      <span class="sel"><input type="checkbox" class="page-cb" data-i="${i}" checked><span>${page.strokes.length} 笔</span></span></div>`;
+    card.querySelector(".page-cb").onchange = updateSelCount;
+    card.onclick = (e) => { if (e.target.type !== "checkbox") { $("modalBox").innerHTML = SVG_CACHE[i]; $("modal").classList.add("open"); } };
     grid.appendChild(card);
   });
   grid.style.display = "grid";
+  $("selectBar").style.display = "flex";
+  updateSelCount();
+}
+
+function updateSelCount() {
+  const cbs = document.querySelectorAll(".page-cb:checked");
+  $("selCount").textContent = `已选 ${cbs.length} / ${PAGES.length} 页`;
+}
+
+function getSelectedPages() {
+  return [...document.querySelectorAll(".page-cb:checked")].map(cb => parseInt(cb.dataset.i));
 }
 
 /* 事件绑定 */
 const dz = $("dropzone"), fi = $("fileInput");
 dz.onclick = () => fi.click();
 $("btnOpen").onclick = () => fi.click();
+$("selectAll").onchange = () => {
+  const checked = $("selectAll").checked;
+  document.querySelectorAll(".page-cb").forEach(cb => cb.checked = checked);
+  updateSelCount();
+};
 fi.onchange = e => { if (e.target.files[0]) processFile(e.target.files[0]); };
 dz.ondragover = e => { e.preventDefault(); dz.classList.add("drag"); };
 dz.ondragleave = () => dz.classList.remove("drag");
@@ -1031,8 +1059,10 @@ function download(bytes, name, mime) {
 $("btnSvg").onclick = async () => {
   if (!SVG_CACHE.length) return;
   $("btnSvg").disabled = true;
+  const sel = getSelectedPages();
+  if (!sel.length) { $("btnSvg").disabled = false; return; }
   await setProgress(5, "打包 SVG…");
-  const entries = PAGES.map((p, i) => ({ name: `${ARCHIVE_NAME}/${p.name}.svg`, data: te.encode(SVG_CACHE[i]) }));
+  const entries = sel.map(i => ({ name: `${ARCHIVE_NAME}/${PAGES[i].name}.svg`, data: te.encode(SVG_CACHE[i]) }));
   const zip = buildZip(entries);
   download(zip, `${ARCHIVE_NAME}-svg.zip`, "application/zip");
   await setProgress(100, "SVG 打包完成");
@@ -1042,8 +1072,11 @@ $("btnSvg").onclick = async () => {
 $("btnPdf").onclick = async () => {
   if (!PAGES.length) return;
   $("btnPdf").disabled = true;
+  const sel = getSelectedPages();
+  if (!sel.length) { $("btnPdf").disabled = false; return; }
   try {
-    const pdf = await buildPdf(PAGES, (pct) => setProgress(pct, `生成 PDF… ${pct}%`));
+    const selected = sel.map(i => PAGES[i]);
+    const pdf = await buildPdf(selected, (pct) => setProgress(pct, `生成 PDF… ${pct}%`));
     download(pdf, `${ARCHIVE_NAME}.pdf`, "application/pdf");
     await setProgress(100, "PDF 导出完成");
   } catch (err) {
@@ -1056,19 +1089,22 @@ $("btnPdf").onclick = async () => {
 $("btnPng").onclick = async () => {
   if (!SVG_CACHE.length) return;
   $("btnPng").disabled = true;
+  const sel = getSelectedPages();
+  if (!sel.length) { $("btnPng").disabled = false; return; }
   try {
     const ppi = parseInt($("ppiInput").value) || 300;
     const paperSize = $("sizeSelect").value;
     const paperMm = { a4: [210, 297], a3: [297, 420], a5: [148, 210], letter: [215.9, 279.4] }[paperSize] || [210, 297];
     const pw = Math.round(paperMm[0] * ppi / 25.4);
     const ph = Math.round(paperMm[1] * ppi / 25.4);
-    const maxW = Math.max(...PAGES.map(p => p.width));
-    const maxH = Math.max(...PAGES.map(p => p.height));
+    const maxW = Math.max(...sel.map(i => PAGES[i].width));
+    const maxH = Math.max(...sel.map(i => PAGES[i].height));
     const scale = Math.min(pw / maxW, ph / maxH);
 
-    const total = PAGES.length;
-    for (let i = 0; i < total; i++) {
-      await setProgress(Math.round(100 * i / total), `导出 PNG ${i + 1}/${total}…`);
+    const total = sel.length;
+    for (let k = 0; k < total; k++) {
+      const i = sel[k];
+      await setProgress(Math.round(100 * k / total), `导出 PNG ${k + 1}/${total}…`);
       const svgText = SVG_CACHE[i].replace(/<svg[^>]*>/, m => m.replace(/(width|height)="[^"]*"/g, '').replace('>', ` width="${PAGES[i].width}" height="${PAGES[i].height}">`));
       const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
       const url = URL.createObjectURL(blob);
