@@ -18,6 +18,9 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
+import os
+from datetime import datetime
+
 from hinote_infinite import (
     is_penkit_block,
     discover_blocks as discover_penkit_blocks,
@@ -712,7 +715,34 @@ def subset_cjk_font(characters: set[str]) -> dict | None:
 
 
 def write_pdf(destination: Path, pages: list[Page]) -> None:
-    objects: list[bytes] = [b"<< /Type /Catalog /Pages 2 0 R >>", b""]
+    objects: list[bytes] = [b"<< /Type /Catalog /Pages 2 0 R /Metadata 3 0 R >>", b""]
+    # Document information dictionary + XMP metadata
+    now = datetime.now().strftime("D:%Y%m%d%H%M%S+08'00'")
+    info = (
+        f"<< /Title (Hinoter Export) /Author (Hinoter) /Subject (Huawei Hinote Vector Export) "
+        f"/Producer (Hinoter) /Creator (Hinote Vector Export) /CreationDate ({now}) /ModDate ({now}) >>"
+    ).encode("ascii")
+    objects.append(info)
+    xmp = (
+        '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+        '<rdf:Description rdf:about=""\n'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/"\n'
+        ' xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
+        ' xmlns:pdf="http://ns.adobe.com/pdf/1.3/">\n'
+        f' <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Hinoter Export</rdf:li></rdf:Alt></dc:title>\n'
+        f' <dc:creator><rdf:Seq><rdf:li>Hinoter</rdf:li></rdf:Seq></dc:creator>\n'
+        f' <xmp:CreateDate>{now}</xmp:CreateDate>\n'
+        f' <xmp:ModifyDate>{now}</xmp:ModifyDate>\n'
+        f' <pdf:Producer>Hinoter</pdf:Producer>\n'
+        '</rdf:Description>\n'
+        '</rdf:RDF>\n'
+        '</x:xmpmeta>\n'
+        '<?xpacket end="w"?>\n'
+    ).encode("utf-8")
+    xmp_obj = f"<< /Type /Metadata /Subtype /XML /Length {len(xmp)} >>\nstream\n".encode("ascii") + xmp + b"\nendstream"
+    objects.append(xmp_obj)
     page_ids: list[int] = []
 
     # Build one shared subsetted CJK font for every text element.
