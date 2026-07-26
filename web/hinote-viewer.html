@@ -747,7 +747,15 @@ async function buildPdf(pages, onProgress) {
     if (onProgress) await onProgress(60 + Math.round(20 * (pi + 1) / pages.length));
   }
 
-  const objects = [te.encode("<< /Type /Catalog /Pages 2 0 R >>"), new Uint8Array(0)];
+  const objects = [te.encode("<< /Type /Catalog /Pages 2 0 R /Metadata 3 0 R >>"), new Uint8Array(0)];
+  // Document info (object 2)
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  const ts = `D:${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}+08'00'`;
+  objects.push(te.encode(`<< /Title (Hinoter Export) /Author (Hinoter) /Subject (Huawei Hinote Vector Export) /Producer (Hinoter) /Creator (Hinote Vector Export) /CreationDate (${ts}) /ModDate (${ts}) >>`));
+  // XMP metadata (object 3)
+  const xmp = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>\n<x:xmpmeta xmlns:x="adobe:ns:meta/">\n<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n<rdf:Description rdf:about=""\n xmlns:dc="http://purl.org/dc/elements/1.1/"\n xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n xmlns:pdf="http://ns.adobe.com/pdf/1.3/">\n <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Hinoter Export</rdf:li></rdf:Alt></dc:title>\n <dc:creator><rdf:Seq><rdf:li>Hinoter</rdf:li></rdf:Seq></dc:creator>\n <xmp:CreateDate>${ts}</xmp:CreateDate>\n <xmp:ModifyDate>${ts}</xmp:ModifyDate>\n <pdf:Producer>Hinoter</pdf:Producer>\n</rdf:Description>\n</rdf:RDF>\n</x:xmpmeta>\n<?xpacket end="w"?>\n`;
+  objects.push(u8concat([te.encode(`<< /Type /Metadata /Subtype /XML /Length ${xmp.length} >>\nstream\n`), te.encode(xmp), te.encode("\nendstream")]));
   const pageIds = [];
   const enc = s => te.encode(s);
 
