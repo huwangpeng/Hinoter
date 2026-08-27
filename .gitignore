@@ -13,3 +13,6 @@ __pycache__/
 .workbuddy/
 
 sample/
+
+# Mimosa 扫描工具状态
+.mimosa/
