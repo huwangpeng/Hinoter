@@ -8,12 +8,10 @@ multiple ``files/bsd_{grid_x}_{grid_y}_{uuid}.bin`` blocks.  Each block's
 filename encodes its position on an abstract grid, and the visible viewport
 is defined by the page's ``thumbnail_area`` metadata.
 
-The format is **not yet fully decoded**.  This module provides the scaffolding
-(file discovery, binary header parsing, known-field extraction) so that
-downstream code can discover and classify blocks without importing the main
-export pipeline.  Implement the decoder functions (``decode_block`` and
-``assemble_canvas``) once the stride, style-record layout, and coordinate
-mapping are reverse-engineered.
+The point-table framing and point coordinates are decoded.  Stroke styles,
+the 65-byte per-stroke payload, and the ``gsd``/``ged`` sidecar files are not
+fully understood yet, so the result is suitable for inspection rather than
+pixel-accurate export.
 
 Usage::
 
@@ -44,12 +42,8 @@ from pathlib import Path
 PENKIT_MAGIC = b"PENKITINFENG"
 """Magic bytes that identify a PENKITINFENG binary block (12 bytes)."""
 
-PENKIT_HEADER_SIZE = 100
-"""Total header size for PENKITINFENG blocks (confirmed via sample analysis).
-
-Includes: 12-byte magic + 88 bytes of style/state data.  The first point
-table [count, stride=28, reserved=0] starts immediately after this header.
-"""
+PENKIT_HEADER_SIZE = 52
+"""Size of the confirmed BSD file header."""
 
 PENKIT_POINT_STRIDE = 28
 """Confirmed point-record size (bytes) for PENKITINFENG, discovered via
@@ -63,28 +57,28 @@ FILE_RE = re.compile(r"^bsd_(-?\d+)_(-?\d+)_")
 
 @dataclass
 class PenkitHeader:
-    """Parsed fields from a 100-byte PENKITINFENG header (confirmed via
-    ``sample/无边.hinote`` analysis).
+    """The confirmed fields in the 100-byte block header.
 
-    Fields are big-endian unless noted.  Offsets are relative to the
-    start of the block (after the 12-byte magic).
+    The remaining words are deliberately kept raw.  Earlier revisions named
+    several of them ``color`` and ``base_width`` without enough evidence; the
+    sample files show that those values are identifiers and framing data.
     """
-    block_type: int = 0            # [12:16] — always 0x00000001
-    flags: int = 0                 # [16:20] — typically 0x00010000
-    sequence_id: int = 0           # [20:24] — increments across edits (e.g. 0x0006567e)
-    color: tuple[int, int, int] = (0, 0, 0)   # [24:28] — ARGB value
-    base_width: int = 0            # [28:32] — BE uint (NOT float)
-    unknown_32: int = 0            # [32:36] — always 8 in observed samples
-    data_length: int = 0           # [36:40] — bytes after this header
-    grid_total: int = 0            # [40:44] — total points across all blocks?
-    stylus_type: int = 0           # [44:48] — pen type / tool ID
-    extra_flag: int = 0            # [48:52] — per-block flag
-    split_flag: int = 0            # [52:56] — splitting flag
-    field_56: int = 0              # [56:60]
-    field_60: int = 0              # [60:64]
-    field_64: int = 0              # [64:68]
-    field_68: int = 0              # [68:72]
-    raw_72_100: bytes = field(default_factory=bytes)  # [72:100] — remaining 28 bytes
+    block_type: int = 0
+    flags: int = 0
+    block_id_high: int = 0
+    block_id_low: int = 0
+    data_length: int = 0
+    stroke_count: int = 0
+    raw_words: tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass
+class PenkitGridEntry:
+    """One GSD grid-to-BSD mapping record."""
+    grid_x: int
+    grid_y: int
+    block_id_high: int
+    block_id_low: int
 
 
 @dataclass
@@ -120,6 +114,10 @@ class InfiniteCanvas:
     """Canvas width in page units."""
     height: float = 1000.0
     """Canvas height in page units."""
+    min_x: float = 0.0
+    """Left edge of the decoded stroke bounds."""
+    min_y: float = 0.0
+    """Top edge of the decoded stroke bounds."""
 
 
 # --- Utility helpers ----------------------------------------------------
@@ -145,7 +143,7 @@ def is_penkit_block(data: bytes) -> bool:
 
 
 def parse_penkit_header(data: bytes) -> PenkitHeader | None:
-    """Parse the 100-byte header of a raw PENKITINFENG block.
+    """Parse the 52-byte header of a raw BSD block.
 
     Returns ``None`` if the data is too short or doesn't start with the
     expected magic.
@@ -155,34 +153,38 @@ def parse_penkit_header(data: bytes) -> PenkitHeader | None:
 
     # Offsets are absolute from start of block (magic is at 0-11)
     u32 = lambda o: struct.unpack_from(">I", data, o)[0]
-    f32 = lambda o: struct.unpack_from(">f", data, o)[0]
-
-    hdr = PenkitHeader(
+    return PenkitHeader(
         block_type=u32(12),
         flags=u32(16),
-        sequence_id=u32(20),
-        base_width=u32(28),
-        unknown_32=u32(32),
+        block_id_high=u32(20),
+        block_id_low=u32(24),
         data_length=u32(36),
-        grid_total=u32(40),
-        stylus_type=u32(44),
-        extra_flag=u32(48),
-        split_flag=u32(52),
-        field_56=u32(56),
-        field_60=u32(60),
-        field_64=u32(64),
-        field_68=u32(68),
-        raw_72_100=data[72:PENKIT_HEADER_SIZE],
+        stroke_count=u32(44),
+        raw_words=tuple(u32(offset) for offset in range(28, 52, 4)),
     )
 
-    # Color: ARGB at offset 24
-    color_raw = u32(24)
-    if color_raw not in (0, 0xFFFFFFFF):
-        hdr.color = ((color_raw >> 16) & 0xFF,
-                     (color_raw >> 8) & 0xFF,
-                     color_raw & 0xFF)
 
-    return hdr
+def parse_penkit_grid_index(data: bytes) -> tuple[float, list[PenkitGridEntry]]:
+    """Parse the observed GSD grid index.
+
+    Returns ``(grid_size, entries)``.  Unknown or malformed data returns an
+    empty entry list instead of guessing.
+    """
+    if len(data) < 64 or not is_penkit_block(data):
+        return (0.0, [])
+    block_type = struct.unpack_from(">I", data, 12)[0]
+    payload_size = struct.unpack_from(">I", data, 56)[0]
+    count = struct.unpack_from(">I", data, 60)[0]
+    if block_type != 3 or payload_size != count * 16 or 64 + payload_size > len(data):
+        return (0.0, [])
+
+    grid_size = struct.unpack_from(">f", data, 44)[0]
+    entries: list[PenkitGridEntry] = []
+    for index in range(count):
+        offset = 64 + index * 16
+        grid_x, grid_y, block_hi, block_lo = struct.unpack_from(">iiII", data, offset)
+        entries.append(PenkitGridEntry(grid_x, grid_y, block_hi, block_lo))
+    return (grid_size, entries)
 
 
 def grid_key(name: str) -> tuple[int, int] | None:
@@ -218,25 +220,21 @@ def discover_blocks(files: dict[str, bytes]) -> dict[tuple[int, int], PenkitBloc
 def parse_thumbnail_area(data1: str) -> dict[str, float]:
     """Parse ``thumbnail_area`` from a page's ``data1`` JSON field.
 
-    The value is typically a comma-separated string like
-    ``"thumbnail_area": "-0.2,-0.5,1.2,1.5"`` representing the visible
-    viewport in normalised coordinates ``(x_min, y_min, x_max, y_max)``
-    relative to the grid.
+    Huawei stores ``thumbnail_area`` as a JSON string nested inside ``data1``.
+    Confirmed fields are ``centerX``, ``centerY`` and ``scalingFactor``.
     """
-    result: dict[str, float] = {
-        "x0": 0.0, "y0": 0.0,
-        "x1": 1.0, "y1": 1.0,
-    }
-    # Try to extract from the nested JSON inside data1
+    result: dict[str, float] = {}
     try:
         import json
         parsed = json.loads(data1)
-        area = parsed.get("thumbnail_area", "")
-        if area and isinstance(area, str):
-            parts = [float(v) for v in area.split(",")]
-            if len(parts) == 4:
-                result["x0"], result["y0"], result["x1"], result["y1"] = parts
-    except (json.JSONDecodeError, ValueError, TypeError):
+        area = parsed.get("thumbnail_area")
+        if isinstance(area, str) and area:
+            area = json.loads(area)
+        if isinstance(area, dict):
+            for key in ("centerX", "centerY", "scalingFactor"):
+                if key in area:
+                    result[key] = float(area[key])
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
         pass
     return result
 
@@ -246,92 +244,90 @@ def parse_thumbnail_area(data1: str) -> dict[str, float]:
 def decode_penkit_strokes(data: bytes) -> list[dict]:
     """Extract strokes from a raw PENKITINFENG block.
 
-    Supports both Big-Endian (BE) and Little-Endian (LE) table encodings,
-    extracting 2D point coordinates and real-time stylus pressure data.
+    Point-table headers are big-endian and may start at any byte offset.  Each
+    table is ``[point_count, 28, 0]``, followed by a 28-byte bounds record,
+    ``point_count`` point records, then 65 bytes whose meaning is still under
+    investigation.  That 65-byte payload is why scanning on four-byte
+    boundaries misses most strokes.
     """
-    HEADER = PENKIT_HEADER_SIZE
-    u32_be = lambda d, o: struct.unpack_from(">I", d, o)[0]
-    u32_le = lambda d, o: struct.unpack_from("<I", d, o)[0]
-    f32_be = lambda d, o: struct.unpack_from(">f", d, o)[0]
+    if len(data) < PENKIT_HEADER_SIZE or not is_penkit_block(data):
+        return []
 
-    color = (0, 0, 0)
-    if len(data) >= 28:
-        c_raw = u32_be(data, 24)
-        if c_raw not in (0, 0xFFFFFFFF):
-            r = (c_raw >> 16) & 0xFF
-            g = (c_raw >> 8) & 0xFF
-            b = c_raw & 0xFF
-            color = (r, g, b)
+    header = parse_penkit_header(data)
+    if header is None or header.block_type != 1:
+        return []
 
+    descriptor_size = 48
+    table_header_size = 12
+    bounds_record_size = PENKIT_POINT_STRIDE
+    point_prefix_size = 1
+    trailing_payload_size = 16
     strokes: list[dict] = []
+    offset = PENKIT_HEADER_SIZE
+    for stroke_index in range(header.stroke_count):
+        descriptor_at = offset
+        table_at = descriptor_at + descriptor_size
+        if table_at + table_header_size + bounds_record_size > len(data):
+            break
 
-    for off in range(HEADER, len(data) - 12, 4):
-        # 1. Try Big-Endian table pattern [count, 28, 0]
-        cnt_be, st_be, z_be = struct.unpack_from(">III", data, off)
-        if 2 <= cnt_be <= 16384 and st_be == PENKIT_POINT_STRIDE and z_be == 0:
-            pts_start = off + 12
-            pts_end = pts_start + cnt_be * st_be
-            if pts_end <= len(data):
-                r0 = pts_start
-                min_x = f32_be(data, r0 + 4)
-                min_y = f32_be(data, r0 + 8)
-                max_x = f32_be(data, r0 + 12)
-                max_y = f32_be(data, r0 + 16)
+        count, stride, reserved = struct.unpack_from(">III", data, table_at)
+        point_data = table_at + table_header_size + bounds_record_size + point_prefix_size
+        table_end = point_data + count * PENKIT_POINT_STRIDE + trailing_payload_size
+        valid_header = (
+            2 <= count <= 16384
+            and stride == PENKIT_POINT_STRIDE
+            and reserved == 0
+            and struct.unpack_from(">I", data, descriptor_at + 12)[0] == count * stride
+            and table_end <= len(data)
+        )
+        if not valid_header:
+            break
 
-                points: list[tuple[float, float]] = []
-                pressures: list[float] = []
-                for ri in range(1, cnt_be):
-                    ro = r0 + ri * st_be
-                    x = f32_be(data, ro + 17)
-                    y = f32_be(data, ro + 21)
-                    p_raw = f32_be(data, ro + 1)
-                    p = p_raw if (math.isfinite(p_raw) and 0.01 <= p_raw <= 2.0) else 0.5
-                    if math.isfinite(x) and math.isfinite(y):
-                        points.append((x, y))
-                        pressures.append(p)
+        bounds_at = table_at + table_header_size
+        bbox = struct.unpack_from(">ffff", data, bounds_at + 4)
+        first_record = point_data
+        pen_type = struct.unpack_from(">I", data, first_record)[0]
+        base_width = struct.unpack_from(">f", data, first_record + 4)[0]
+        argb = struct.unpack_from(">I", data, first_record + 8)[0]
+        style_opacity = struct.unpack_from(">f", data, first_record + 12)[0]
+        alpha = ((argb >> 24) & 0xFF) / 255.0
+        color = ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF)
 
-                if len(points) >= 2:
-                    strokes.append({
-                        "points": points,
-                        "pressures": pressures,
-                        "bbox": (min_x, min_y, max_x, max_y),
-                        "color": color,
-                        "base_width": 4.0,
-                        "opacity": 1.0,
-                        "is_le": False
-                    })
+        points: list[tuple[float, float]] = []
+        pressures: list[float] = []
+        elapsed_ms: list[int] = []
+        for index in range(count):
+            record = point_data + index * PENKIT_POINT_STRIDE
+            x, y = struct.unpack_from(">ff", data, record + 16)
+            if not (math.isfinite(x) and math.isfinite(y)):
+                continue
+            pressure = struct.unpack_from(">f", data, record)[0] if index else 0.5
+            if not (math.isfinite(pressure) and 0.0 <= pressure <= 1.5):
+                pressure = 0.5
+            points.append((x, y))
+            pressures.append(pressure)
+            elapsed_ms.append(struct.unpack_from(">I", data, record + 24)[0])
 
-        # 2. Try Little-Endian table pattern [count, 28, z_val != 0]
-        cnt_le, st_le, z_le = struct.unpack_from("<III", data, off)
-        if 2 <= cnt_le <= 16384 and st_le == PENKIT_POINT_STRIDE and z_le != 0:
-            pts_start = off + 12
-            pts_end = pts_start + cnt_le * st_le
-            if pts_end <= len(data):
-                r0 = pts_start
-                points: list[tuple[float, float]] = []
-                pressures: list[float] = []
-                for ri in range(1, cnt_le):
-                    ro = r0 + ri * st_le
-                    x = f32_be(data, ro + 14)
-                    y = f32_be(data, ro + 18)
-                    p_raw = f32_be(data, ro + 16)
-                    p = p_raw if (math.isfinite(p_raw) and 0.01 <= p_raw <= 2.0) else 0.5
-                    if math.isfinite(x) and math.isfinite(y) and abs(x) < 100000 and abs(y) < 100000:
-                        points.append((x, y))
-                        pressures.append(p)
+        if len(pressures) > 1:
+            pressures[0] = pressures[1]
 
-                if len(points) >= 2:
-                    xs = [p[0] for p in points]
-                    ys = [p[1] for p in points]
-                    strokes.append({
-                        "points": points,
-                        "pressures": pressures,
-                        "bbox": (min(xs), min(ys), max(xs), max(ys)),
-                        "color": color,
-                        "base_width": 4.0,
-                        "opacity": 1.0,
-                        "is_le": True
-                    })
+        if len(points) >= 2:
+            strokes.append({
+                "points": points,
+                "pressures": pressures,
+                "elapsed_ms": elapsed_ms,
+                "bbox": bbox,
+                "color": color,
+                "argb": argb,
+                "base_width": base_width,
+                "opacity": alpha * style_opacity,
+                "pen_type": pen_type,
+                "stroke_index": stroke_index,
+                "descriptor_offset": descriptor_at,
+                "table_offset": table_at,
+            })
+
+        offset = table_end
 
     return strokes
 
@@ -352,21 +348,23 @@ def assemble_canvas(blocks: list[PenkitBlock],
     for blk in blocks:
         strokes = decode_penkit_strokes(blk.data)
         for s in strokes:
-            # Translate points by grid offset
+            # bsd point records already use global canvas coordinates.  The
+            # grid position is metadata and must not be added a second time.
             s["grid_x"] = blk.grid_x
             s["grid_y"] = blk.grid_y
             all_strokes.append(s)
 
     canvas.strokes = all_strokes
 
-    # Compute canvas extent from block positions
-    if blocks:
-        xs = [b.grid_x for b in blocks]
-        ys = [b.grid_y for b in blocks]
-        span_x = max(xs) - min(xs) + 1
-        span_y = max(ys) - min(ys) + 1
-        canvas.width = span_x * 1000.0
-        canvas.height = span_y * 1000.0
+    # Coordinates are global; derive the extent from stroke bounds instead of
+    # assuming a page-sized cell or shifting negative grid coordinates.
+    if all_strokes:
+        canvas.min_x = min(stroke["bbox"][0] for stroke in all_strokes)
+        canvas.min_y = min(stroke["bbox"][1] for stroke in all_strokes)
+        max_x = max(stroke["bbox"][2] for stroke in all_strokes)
+        max_y = max(stroke["bbox"][3] for stroke in all_strokes)
+        canvas.width = max_x - canvas.min_x
+        canvas.height = max_y - canvas.min_y
 
     return canvas
 
@@ -398,9 +396,11 @@ def main() -> None:
         blk = blocks[gk]
         hdr = parse_penkit_header(blk.data)
         if hdr:
-            print(f"  Grid ({gk[0]}, {gk[1]})  stride={hdr.stride}  "
-                  f"pen={hdr.pen_type}  width={hdr.base_width:.1f}  "
-                  f"points_est={hdr.point_count}")
+            strokes = decode_penkit_strokes(blk.data)
+            points = sum(len(stroke["points"]) for stroke in strokes)
+            print(f"  Grid ({gk[0]}, {gk[1]})  "
+                  f"strokes={len(strokes)}/{hdr.stroke_count}  "
+                  f"points={points}  bytes={len(blk.data)}")
         else:
             print(f"  Grid ({gk[0]}, {gk[1]})  <header parse failed>")
 

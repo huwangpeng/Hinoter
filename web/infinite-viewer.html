@@ -3,26 +3,67 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
 <title>华为笔记 · 无界画布预览器</title>
+<script>
+  try {
+    const savedTheme = localStorage.getItem("hinoter-theme");
+    if (savedTheme === "light" || savedTheme === "dark") {
+      document.documentElement.dataset.theme = savedTheme;
+    }
+  } catch (_) {}
+</script>
 <style>
   :root {
+    color-scheme: light;
     --bg: #f5f6f8; --card: #ffffff; --ink: #1d2129;
-    --muted: #6b7280; --line: #e5e7eb; --accent: #2563eb;
-    --accent-soft: #dbeafe; --radius: 12px;
+    --muted: #6b7280; --line: #e5e7eb; --line-soft: #f0f0f0;
+    --accent: #2563eb; --accent-hover: #1d4ed8; --accent-soft: #dbeafe;
+    --drop-line: #c3cbd6; --progress-track: #e9edf3;
+    --focus: rgba(37, 99, 235, .34); --radius: 12px;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117; --card: #151b23; --ink: #e6edf3;
+    --muted: #94a3b8; --line: #2b3542; --line-soft: #222c37;
+    --accent: #78a9ff; --accent-hover: #9bc0ff; --accent-soft: #172b4d;
+    --drop-line: #465365; --progress-track: #222c37;
+    --focus: rgba(120, 169, 255, .42);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d1117; --card: #151b23; --ink: #e6edf3;
+      --muted: #94a3b8; --line: #2b3542; --line-soft: #222c37;
+      --accent: #78a9ff; --accent-hover: #9bc0ff; --accent-soft: #172b4d;
+      --drop-line: #465365; --progress-track: #222c37;
+      --focus: rgba(120, 169, 255, .42);
+    }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: -apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
     background: var(--bg); color: var(--ink); min-height: 100vh;
+    transition: background-color .2s ease, color .2s ease;
   }
-  header { padding: 28px 24px 0; text-align: center; }
+  header { position: relative; padding: 28px 132px 0; text-align: center; }
   header h1 { font-size: 24px; font-weight: 700; }
   header p { margin-top: 4px; color: var(--muted); font-size: 13px; }
   .container { max-width: 1400px; margin: 0 auto; padding: 0 16px 40px; }
 
+  .theme-toggle {
+    position: absolute; top: 18px; right: 24px; display: inline-flex;
+    align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--card); color: var(--ink);
+    font: inherit; font-size: 13px; cursor: pointer;
+    transition: border-color .15s, background-color .2s, color .2s;
+  }
+  .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .theme-toggle .theme-icon { font-size: 16px; line-height: 1; }
+
   /* Drop zone */
   #dropzone {
-    border: 2px dashed #c3cbd6; border-radius: var(--radius);
+    border: 2px dashed var(--drop-line); border-radius: var(--radius);
     background: var(--card); padding: 48px 24px; text-align: center;
     cursor: pointer; transition: border-color .2s, background .2s;
     margin-top: 28px;
@@ -40,7 +81,7 @@
 
   /* Progress */
   #progressWrap { margin-top: 20px; display: none; }
-  .bar { height: 10px; background: #e9edf3; border-radius: 99px; overflow: hidden; }
+  .bar { height: 10px; background: var(--progress-track); border-radius: 99px; overflow: hidden; }
   .bar > div { height: 100%; width: 0%; background: linear-gradient(90deg,#2563eb,#38bdf8); border-radius: 99px; transition: width .15s ease; }
   #progressText { margin-top: 8px; font-size: 13px; color: var(--muted); text-align: center; }
 
@@ -54,7 +95,7 @@
   }
   .btn2:hover { border-color: var(--accent); color: var(--accent); }
   .btn2.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn2.primary:hover { background: #1d4ed8; color:#fff; }
+  .btn2.primary:hover { background: var(--accent-hover); color:#fff; }
   .btn2:disabled { opacity: .5; cursor: default; }
 
   /* Layout: info panel + canvas */
@@ -71,7 +112,7 @@
     font-size: 13px; line-height: 1.6;
   }
   #infoPanel h3 { font-size: 15px; margin-bottom: 10px; color: var(--accent); }
-  #infoPanel .stat { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #f0f0f0; }
+  #infoPanel .stat { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid var(--line-soft); }
   #infoPanel .stat .val { font-weight: 600; color: var(--ink); }
   #infoPanel .section { margin-top: 14px; }
   .block-badge {
@@ -101,24 +142,39 @@
   #stridePanel label { font-size: 13px; color: var(--muted); margin-right: 8px; }
   #stridePanel select {
     padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
-    font-size: 13px; background: var(--card);
+    font-size: 13px; background: var(--card); color: var(--ink);
   }
 
   /* Grid legend */
   #legend { margin-top: 10px; }
   .legend-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
-  .legend-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); flex-shrink: 0; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line); flex-shrink: 0; }
 
   /* Notice */
   #notice { margin-top: 12px; font-size: 13px; color: var(--muted); text-align: center; display: none; }
 
   footer { margin-top: 40px; padding: 20px 0; text-align: center; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); }
+
+  .btn2:focus-visible, .theme-toggle:focus-visible, #stridePanel select:focus-visible {
+    outline: 3px solid var(--focus); outline-offset: 2px;
+  }
+  @media (max-width: 600px) {
+    header { padding: 68px 16px 0; }
+    .theme-toggle { top: 16px; right: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body, #dropzone, .bar > div, .btn2, .theme-toggle { transition: none; }
+  }
 </style>
 </head>
 <body>
 
 <header>
   <h1>华为笔记 · 无界画布预览器</h1>
+  <button class="theme-toggle" id="btnTheme" type="button" aria-pressed="false">
+    <span class="theme-icon" aria-hidden="true">◐</span>
+    <span id="themeText">深色</span>
+  </button>
 </header>
 
 <div class="container">
@@ -199,8 +255,8 @@ const PENKIT_MAGIC = "PENKITINFENG";
 const PENCIL_MAGIC = "PENCILENGINE";
 const POINT_STRIDE = 36;
 
-// 点阵背景（与有界笔记 base6 相同的间距规格）
-const DOT_GRID = { spacing: 33.0, x0: 18.0, y0: 17.0 };
+// 无边画布样本的点阵间距；内嵌缩略图与 73 单位间距一致。
+const DOT_GRID = { spacing: 73.0, x0: 0.0, y0: 0.0 };
 const DOT_RADIUS = 1.3;
 const DOT_COLOR = "#dddddd";
 
@@ -281,120 +337,89 @@ function parsePenkitHeader(data) {
   if (data.length < 52 || !isPenkit(data)) return null;
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const u32 = o => dv.getUint32(o, false);
-  const f32 = o => dv.getFloat32(o, false);
-  
-  let color = [0, 0, 0];
-  const cRaw = u32(24);
-  if (cRaw !== 0 && cRaw !== 0xFFFFFFFF) {
-    color = [(cRaw >> 16) & 0xFF, (cRaw >> 8) & 0xFF, cRaw & 0xFF];
-  }
-  
+
   return {
-    blockLength: u32(12),
-    penType: u32(16),
-    sequenceId: u32(20),
-    colorRaw: cRaw,
-    color: color,
-    baseWidth: 4.0,
-    stride: 28,
+    blockType: u32(12),
+    flags: u32(16),
+    blockIdHigh: u32(20),
+    blockIdLow: u32(24),
+    dataLength: u32(36),
+    strokeCount: u32(44),
   };
 }
 
-function decodePenkitStrokes(data, requestedStride) {
+function decodePenkitStrokes(data) {
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const f32 = o => dv.getFloat32(o, false);
-  const u32_be = o => dv.getUint32(o, false);
-  const u32_le = o => dv.getUint32(o, true);
+  const u32 = o => dv.getUint32(o, false);
   const strokes = [];
-  const HEADER = 100;
+  const HEADER = 52;
+  const descriptorSize = 48;
   const stride = 28;
+  const trailingPayload = 16;
+  const header = parsePenkitHeader(data);
+  if (!header || header.blockType !== 1) return strokes;
+  let off = HEADER;
 
-  let blockColor = [30, 64, 175];
-  if (data.length >= 28) {
-    const cRaw = u32_be(24);
-    if (cRaw !== 0 && cRaw !== 0xFFFFFFFF) {
-      blockColor = [(cRaw >> 16) & 0xFF, (cRaw >> 8) & 0xFF, cRaw & 0xFF];
+  for (let strokeIndex = 0; strokeIndex < header.strokeCount; strokeIndex++) {
+    const descriptorAt = off;
+    const tableAt = descriptorAt + descriptorSize;
+    if (tableAt + 40 > data.length) break;
+    const count = u32(tableAt);
+    const tableStride = u32(tableAt + 4);
+    const reserved = u32(tableAt + 8);
+    const boundsAt = tableAt + 12;
+    const pointsAt = boundsAt + stride + 1;
+    const tableEnd = pointsAt + count * stride;
+
+    if (count < 2 || count > 16384 || tableStride !== stride || reserved !== 0 ||
+        u32(descriptorAt + 12) !== count * stride || tableEnd + trailingPayload > data.length) break;
+
+    const bbox = [f32(boundsAt + 4), f32(boundsAt + 8), f32(boundsAt + 12), f32(boundsAt + 16)];
+    const penType = u32(pointsAt);
+    const baseWidth = f32(pointsAt + 4);
+    const argb = u32(pointsAt + 8);
+    const styleOpacity = f32(pointsAt + 12);
+    const color = [(argb >>> 16) & 0xFF, (argb >>> 8) & 0xFF, argb & 0xFF];
+    const opacity = ((argb >>> 24) & 0xFF) / 255 * styleOpacity;
+    const points = [];
+    const pressures = [];
+    const elapsedMs = [];
+    for (let index = 0; index < count; index++) {
+      const record = pointsAt + index * stride;
+      const pressureRaw = index === 0 ? 0.5 : f32(record);
+      const x = f32(record + 16);
+      const y = f32(record + 20);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const pressure = Number.isFinite(pressureRaw) && pressureRaw >= 0 && pressureRaw <= 1.5 ? pressureRaw : 0.5;
+      points.push([x, y]);
+      pressures.push(pressure);
+      elapsedMs.push(u32(record + 24));
     }
-  }
-
-  for (let off = HEADER; off < data.length - 12; off += 4) {
-    // 1. Try Big-Endian table pattern [count, 28, 0]
-    const cnt_be = u32_be(off);
-    const st_be = u32_be(off + 4);
-    const z_be = u32_be(off + 8);
-    if (cnt_be >= 2 && cnt_be <= 16384 && st_be === stride && z_be === 0) {
-      const ptsStart = off + 12;
-      if (ptsStart + cnt_be * stride <= data.length) {
-        const minX = f32(ptsStart + 4);
-        const minY = f32(ptsStart + 8);
-        const maxX = f32(ptsStart + 12);
-        const maxY = f32(ptsStart + 16);
-
-        const pts = [];
-        const pressures = [];
-        for (let ri = 1; ri < cnt_be; ri++) {
-          const ro = ptsStart + ri * stride;
-          const x = f32(ro + 17);
-          const y = f32(ro + 21);
-          const pRaw = f32(ro + 1);
-          const p = (Number.isFinite(pRaw) && pRaw >= 0.01 && pRaw <= 2.0) ? pRaw : 0.5;
-          if (Number.isFinite(x) && Number.isFinite(y)) {
-            pts.push([x, y]);
-            pressures.push(p);
-          }
-        }
-        if (pts.length >= 2) {
-          strokes.push({
-            points: pts,
-            pressures: pressures,
-            bbox: [minX, minY, maxX, maxY],
-            color: blockColor,
-            baseWidth: 4.0,
-            opacity: 1.0,
-            isLe: false
-          });
-        }
-      }
+    if (pressures.length > 1) pressures[0] = pressures[1];
+    if (points.length >= 2) {
+      strokes.push({
+        points,
+        pressures,
+        elapsedMs,
+        bbox,
+        color,
+        baseWidth,
+        opacity,
+        penType,
+        strokeIndex,
+        tableOffset: tableAt,
+      });
     }
-
-    // 2. Try Little-Endian table pattern [count, 28, z != 0]
-    const cnt_le = u32_le(off);
-    const st_le = u32_le(off + 4);
-    const z_le = u32_le(off + 8);
-    if (cnt_le >= 2 && cnt_le <= 16384 && st_le === stride && z_le !== 0) {
-      const ptsStart = off + 12;
-      if (ptsStart + cnt_le * stride <= data.length) {
-        const pts = [];
-        const pressures = [];
-        for (let ri = 1; ri < cnt_le; ri++) {
-          const ro = ptsStart + ri * stride;
-          const x = f32(ro + 14);
-          const y = f32(ro + 18);
-          const pRaw = f32(ro + 16);
-          const p = (Number.isFinite(pRaw) && pRaw >= 0.01 && pRaw <= 2.0) ? pRaw : 0.5;
-          if (Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) < 100000 && Math.abs(y) < 100000) {
-            pts.push([x, y]);
-            pressures.push(p);
-          }
-        }
-        if (pts.length >= 2) {
-          const xs = pts.map(p => p[0]);
-          const ys = pts.map(p => p[1]);
-          strokes.push({
-            points: pts,
-            pressures: pressures,
-            bbox: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
-            color: blockColor,
-            baseWidth: 4.0,
-            opacity: 1.0,
-            isLe: true
-          });
-        }
-      }
-    }
+    off = tableEnd + trailingPayload;
   }
 
   return strokes;
+}
+
+function getPenkitStrokes(block) {
+  if (!block.decodedStrokes) block.decodedStrokes = decodePenkitStrokes(block.data);
+  return block.decodedStrokes;
 }
 
 // --- PENCILENGINE Decoder (adapted from main viewer) ---
@@ -537,7 +562,7 @@ function renderCanvas(ctx, discovered, stride) {
 
   const allBlockStrokes = [];
   for (const b of discovered) {
-    const strokes = decodePenkitStrokes(b.data, stride);
+    const strokes = getPenkitStrokes(b);
     allBlockStrokes.push({ block: b, strokes });
     totalStrokesCount += strokes.length;
     for (const s of strokes) {
@@ -555,8 +580,9 @@ function renderCanvas(ctx, discovered, stride) {
   ctx.setTransform(zoomLevel, 0, 0, zoomLevel, viewX, viewY);
 
   // --- Grid lines ---
-  // Draw grid cells around populated blocks (1000 x 1000 per cell)
-  const WORLD_GRID = 1000.0;
+  // GSD 中确认的无边画布网格边长。BSD 坐标已经是全局坐标，
+  // 网格只表示落笔归属，不能再用于平移笔迹。
+  const WORLD_GRID = 2500.0;
   ctx.strokeStyle = "#cbd5e1";
   ctx.lineWidth = 1.0 / zoomLevel;
 
@@ -580,12 +606,12 @@ function renderCanvas(ctx, discovered, stride) {
   // --- Dot grid background ---
   if (showDotGrid && Number.isFinite(globalMinX)) {
     ctx.fillStyle = "#94a3b8";
-    const dotStep = 33.0;
+    const dotStep = DOT_GRID.spacing;
     const startX = Math.floor(globalMinX / dotStep - 4) * dotStep;
     const endX = Math.ceil(globalMaxX / dotStep + 4) * dotStep;
     const startY = Math.floor(globalMinY / dotStep - 4) * dotStep;
     const endY = Math.ceil(globalMaxY / dotStep + 4) * dotStep;
-    const r = Math.max(0.7, 1.2 / Math.sqrt(zoomLevel));
+    const r = DOT_RADIUS;
 
     for (let y = startY; y <= endY; y += dotStep) {
       for (let x = startX; x <= endX; x += dotStep) {
@@ -616,13 +642,15 @@ function renderCanvas(ctx, discovered, stride) {
       const prs = s.pressures || [];
       if (pts.length < 2) continue;
 
-      const baseW = (s.baseWidth || 4.0) / Math.sqrt(zoomLevel);
+      const baseW = s.baseWidth || 4.0;
 
       for (let i = 0; i < pts.length - 1; i++) {
         const p1 = pts[i];
         const p2 = pts[i + 1];
-        const press = prs[i] || 0.5;
-        const segW = Math.max(1.0, baseW * press * 1.6);
+        const pStart = Number.isFinite(prs[i]) ? prs[i] : 0.5;
+        const pEnd = Number.isFinite(prs[i + 1]) ? prs[i + 1] : pStart;
+        const press = Math.max(0.08, (pStart + pEnd) / 2);
+        const segW = baseW * press;
 
         ctx.beginPath();
         ctx.lineWidth = segW;
@@ -657,6 +685,33 @@ function renderCanvas(ctx, discovered, stride) {
 
 // --- UI ---
 const $ = id => document.getElementById(id);
+
+const THEME_KEY = "hinoter-theme";
+const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+function activeTheme() {
+  return document.documentElement.dataset.theme || (systemTheme.matches ? "dark" : "light");
+}
+function syncThemeButton() {
+  const dark = activeTheme() === "dark";
+  $("themeText").textContent = dark ? "浅色" : "深色";
+  $("btnTheme").setAttribute("aria-label", dark ? "切换到浅色模式" : "切换到深色模式");
+  $("btnTheme").setAttribute("title", dark ? "切换到浅色模式" : "切换到深色模式");
+  $("btnTheme").setAttribute("aria-pressed", String(dark));
+}
+function toggleTheme() {
+  const next = activeTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+  syncThemeButton();
+}
+$("btnTheme").onclick = toggleTheme;
+syncThemeButton();
+if (systemTheme.addEventListener) {
+  systemTheme.addEventListener("change", () => {
+    if (!document.documentElement.dataset.theme) syncThemeButton();
+  });
+}
+
 let PENCIL_PAGES = [];
 let SVG_CACHE = [];
 let PENKIT_BLOCKS = [];
@@ -813,7 +868,7 @@ async function renderInfiniteView(file, zipEntries, files, penkitBlocks) {
 
   // Read page metadata for thumbnail_area
   const names = Object.keys(zipEntries);
-  let thumbnailArea = "";
+  let thumbnailArea = null;
   for (const name of names) {
     if (zipEntries[name].fullName.startsWith("pages/") && zipEntries[name].fullName.endsWith(".jhinote")) {
       const raw = await files[name].bytes();
@@ -822,22 +877,19 @@ async function renderInfiniteView(file, zipEntries, files, penkitBlocks) {
       const pc = obj.customNotePageContent || obj;
       try {
         const d1 = JSON.parse(pc.data1 || "{}");
-        if (d1.thumbnail_area) { thumbnailArea = d1.thumbnail_area; break; }
+        if (d1.thumbnail_area) {
+          thumbnailArea = typeof d1.thumbnail_area === "string"
+            ? JSON.parse(d1.thumbnail_area)
+            : d1.thumbnail_area;
+          break;
+        }
       } catch (e) { /* ignore */ }
     }
   }
 
   await setProgress(40, `发现 ${penkitBlocks.length} 个 PENKITINFENG 分块…`);
 
-  // Determine stride
-  let detectedStride = 0;
-  for (const b of penkitBlocks) {
-    const hdr = parsePenkitHeader(b.data);
-    if (hdr && hdr.stride > 0 && hdr.stride < 100) {
-      detectedStride = hdr.stride;
-      break;
-    }
-  }
+  const detectedStride = 28;
 
   // Populate info panel
   const infoHtml = [];
@@ -846,33 +898,28 @@ async function renderInfiniteView(file, zipEntries, files, penkitBlocks) {
   infoHtml.push(`<div class="stat"><span>分块数量</span><span class="val">${penkitBlocks.length}</span></div>`);
   infoHtml.push(`<div class="stat"><span>检测步长</span><span class="val">${detectedStride || "未知"}</span></div>`);
   infoHtml.push(`<div class="stat"><span>点阵间距</span><span class="val">${DOT_GRID.spacing} 单位</span></div>`);
-  infoHtml.push(`<div class="stat"><span>可视区域</span><span class="val">${thumbnailArea || "未知"}</span></div>`);
+  const viewportText = thumbnailArea
+    ? `中心 (${thumbnailArea.centerX.toFixed(1)}, ${thumbnailArea.centerY.toFixed(1)}) · 缩放 ${thumbnailArea.scalingFactor.toFixed(2)}`
+    : "未知";
+  infoHtml.push(`<div class="stat"><span>保存视口</span><span class="val">${viewportText}</span></div>`);
 
   // Block list
   const blockHtml = penkitBlocks
     .sort((a, b) => a.gridY - b.gridY || a.gridX - b.gridX)
     .map(b => {
       const hdr = parsePenkitHeader(b.data);
-      const info = hdr ? `步长=${hdr.stride} 笔宽=${hdr.baseWidth.toFixed(1)} 类型=${hdr.penType}` : "头部解析失败";
+      const actualCount = getPenkitStrokes(b).length;
+      const info = hdr ? `笔迹=${actualCount}/${hdr.strokeCount} 块ID=${hdr.blockIdHigh.toString(16).padStart(8, "0")}${hdr.blockIdLow.toString(16).padStart(8, "0")}` : "头部解析失败";
       return `<span class="block-badge" title="${info}">(${b.gridX},${b.gridY}) ${(b.data.length / 1024).toFixed(0)}KB</span>`;
     }).join("");
 
   $("fileInfo").innerHTML = infoHtml.join("\n");
   $("blockList").innerHTML = blockHtml || "无";
 
-  // Set up stride selector
+  // PENKITINFENG 点记录在当前样本中固定为 28 字节。
   const strideSel = $("strideSelect");
-  strideSel.value = detectedStride > 0 ? String(detectedStride) : "0";
-  if (detectedStride > 0) {
-    // Add detected stride to options if not present
-    if (![...strideSel.options].some(o => o.value === String(detectedStride))) {
-      const opt = document.createElement("option");
-      opt.value = String(detectedStride);
-      opt.textContent = `${detectedStride} (检测)`;
-      strideSel.appendChild(opt);
-    }
-  }
-  $("stridePanel").classList.add("active");
+  strideSel.value = String(detectedStride);
+  $("stridePanel").classList.remove("active");
 
   // Render canvas
   const canvas = $("mainCanvas");
@@ -891,6 +938,11 @@ async function renderInfiniteView(file, zipEntries, files, penkitBlocks) {
   viewX = 0;
   viewY = 0;
   const renderResult = renderCanvas(ctx, penkitBlocks, stride);
+  if (renderResult) {
+    const totalPoints = penkitBlocks.reduce((sum, block) =>
+      sum + getPenkitStrokes(block).reduce((strokeSum, stroke) => strokeSum + stroke.points.length, 0), 0);
+    $("strokeStats").textContent = `${renderResult.totalStrokesCount} 笔 · ${totalPoints} 个采样点`;
+  }
 
   if (renderResult && Number.isFinite(renderResult.globalMinX)) {
     const minX = renderResult.globalMinX, maxX = renderResult.globalMaxX;
@@ -934,17 +986,7 @@ async function renderInfiniteView(file, zipEntries, files, penkitBlocks) {
   await setProgress(100, `完成：${penkitBlocks.length} 个分块`);
   setTimeout(() => { $("progressWrap").style.display = "none"; }, 800);
 
-  // Stride change handler
-  strideSel.onchange = () => {
-    const s = parseInt(strideSel.value) || 28;
-    const result = renderCanvas(ctx, penkitBlocks, s);
-    if (result && result.legend) {
-      legendEl.innerHTML = result.legend.map(l =>
-        `<div class="legend-row"><span class="legend-swatch" style="background:${l.color}"></span>` +
-        `<span>(${l.gridX}, ${l.gridY}) — ${l.file}</span></div>`
-      ).join("");
-    }
-  };
+  strideSel.onchange = null;
 }
 
 /* 画布交互：缩放 + 拖拽 */
