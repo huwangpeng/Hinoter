@@ -227,82 +227,155 @@ def color_hex(color: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{channel:02x}" for channel in color)
 
 
-def stroke_outline(stroke: Stroke) -> list[tuple[float, float]]:
-    samples = list(zip(stroke.points, stroke.pressures))
-    n = len(samples)
-    if n < 2:
-        return []
+def clean_stroke_samples(stroke: Stroke) -> tuple[list[tuple[float, float]], list[float]]:
+    """清理重复点，并对压感做一次轻量平滑。"""
+    points: list[tuple[float, float]] = []
+    pressures: list[float] = []
+    min_distance = max(0.01, stroke.base_width * 0.005)
+    for index, point in enumerate(stroke.points):
+        if not (math.isfinite(point[0]) and math.isfinite(point[1])):
+            continue
+        pressure = stroke.pressures[index] if index < len(stroke.pressures) else 0.0
+        if not math.isfinite(pressure) or pressure <= 0:
+            pressure = pressures[-1] if pressures else 0.2
+        if points and math.dist(point, points[-1]) < min_distance:
+            points[-1] = point
+            pressures[-1] = (pressures[-1] + pressure) / 2
+            continue
+        points.append(point)
+        pressures.append(pressure)
+
+    if len(pressures) >= 3 and stroke.pen_type != 5:
+        smoothed = list(pressures)
+        for index in range(1, len(pressures) - 1):
+            smoothed[index] = (
+                pressures[index - 1] + 2 * pressures[index] + pressures[index + 1]
+            ) / 4
+        pressures = smoothed
+    return points, pressures
+
+
+def angle_between(a: tuple[float, float], b: tuple[float, float]) -> float:
+    length = math.hypot(*a) * math.hypot(*b)
+    if length < 1e-9:
+        return 0.0
+    cosine = max(-1.0, min(1.0, (a[0] * b[0] + a[1] * b[1]) / length))
+    return math.acos(cosine)
+
+
+def smooth_stroke_samples(
+    points: list[tuple[float, float]], pressures: list[float]
+) -> tuple[list[tuple[float, float]], list[float]]:
+    """在高曲率位置自适应增加 Hermite 插值点，直线段保持原始采样。"""
+    if len(points) < 3:
+        return points, pressures
+
     tangents: list[tuple[float, float]] = []
-    for i in range(n):
-        if i == 0:
-            dx = samples[1][0][0] - samples[0][0][0]
-            dy = samples[1][0][1] - samples[0][0][1]
-        elif i == n - 1:
-            dx = samples[n - 1][0][0] - samples[n - 2][0][0]
-            dy = samples[n - 1][0][1] - samples[n - 2][0][1]
-        else:
-            dx = samples[i + 1][0][0] - samples[i - 1][0][0]
-            dy = samples[i + 1][0][1] - samples[i - 1][0][1]
-        L = math.hypot(dx, dy)
-        tangents.append((dx / L, dy / L) if L else (1.0, 0.0))
+    for index, point in enumerate(points):
+        if index == 0:
+            tangents.append((points[1][0] - point[0], points[1][1] - point[1]))
+            continue
+        if index == len(points) - 1:
+            tangents.append(
+                (point[0] - points[index - 1][0], point[1] - points[index - 1][1])
+            )
+            continue
+        previous_distance = math.dist(point, points[index - 1])
+        next_distance = math.dist(point, points[index + 1])
+        dx = points[index + 1][0] - points[index - 1][0]
+        dy = points[index + 1][1] - points[index - 1][1]
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            tangents.append((0.0, 0.0))
+            continue
+        magnitude = min(previous_distance, next_distance)
+        tangents.append((dx / length * magnitude, dy / length * magnitude))
 
-    left: list[tuple[float, float]] = []
-    right: list[tuple[float, float]] = []
-    cx: list[float] = []
-    cy: list[float] = []
-    rad: list[float] = []
-    for i in range(n):
-        tx, ty = tangents[i]
-        nx, ny = -ty, tx
-        r = stroke_width(stroke, samples[i][1]) / 2
-        x, y = samples[i][0]
-        left.append((x + nx * r, y + ny * r))
-        right.append((x - nx * r, y - ny * r))
-        cx.append(x)
-        cy.append(y)
-        rad.append(r)
+    smooth_points: list[tuple[float, float]] = []
+    smooth_pressures: list[float] = []
+    for index in range(len(points) - 1):
+        p0, p1 = points[index], points[index + 1]
+        current = (p1[0] - p0[0], p1[1] - p0[1])
+        curvature = 0.0
+        if index > 0:
+            previous = (p0[0] - points[index - 1][0], p0[1] - points[index - 1][1])
+            curvature = max(curvature, angle_between(previous, current))
+        if index + 2 < len(points):
+            following = (points[index + 2][0] - p1[0], points[index + 2][1] - p1[1])
+            curvature = max(curvature, angle_between(current, following))
+        subdivisions = max(1, min(8, math.ceil(curvature / (math.pi / 12))))
+        for step in range(subdivisions):
+            t = step / subdivisions
+            t2, t3 = t * t, t * t * t
+            h00 = 2 * t3 - 3 * t2 + 1
+            h10 = t3 - 2 * t2 + t
+            h01 = -2 * t3 + 3 * t2
+            h11 = t3 - t2
+            smooth_points.append(
+                (
+                    h00 * p0[0] + h10 * tangents[index][0] + h01 * p1[0] + h11 * tangents[index + 1][0],
+                    h00 * p0[1] + h10 * tangents[index][1] + h01 * p1[1] + h11 * tangents[index + 1][1],
+                )
+            )
+            smooth_pressures.append(pressures[index] + (pressures[index + 1] - pressures[index]) * t)
 
-    # Round caps: the endpoint pressure often tapers near zero (pen lift),
-    # which shrinks the cap radius to a point and reads as a sharp angle. Floor
-    # the endpoint radii to a fraction of the stroke's peak width so the cap
-    # arc stays visibly round instead of collapsing to a tip.
-    cap_floor = max(rad) * 0.45
-    for idx in (0, n - 1):
-        if rad[idx] < cap_floor:
-            rad[idx] = cap_floor
-            nx, ny = -tangents[idx][1], tangents[idx][0]
-            x, y = samples[idx][0]
-            left[idx] = (x + nx * cap_floor, y + ny * cap_floor)
-            right[idx] = (x - nx * cap_floor, y - ny * cap_floor)
-
-    outline = list(left)
-    steps = 24
-    a0 = math.atan2(left[n - 1][1] - cy[n - 1], left[n - 1][0] - cx[n - 1])
-    for step in range(1, steps + 1):
-        a = a0 - math.pi * step / steps
-        outline.append((cx[n - 1] + rad[n - 1] * math.cos(a), cy[n - 1] + rad[n - 1] * math.sin(a)))
-    outline.extend(reversed(right))
-    a0 = math.atan2(right[0][1] - cy[0], right[0][0] - cx[0])
-    for step in range(1, steps + 1):
-        a = a0 - math.pi * step / steps
-        outline.append((cx[0] + rad[0] * math.cos(a), cy[0] + rad[0] * math.sin(a)))
-    # Chaikin corner-cutting: one pass rounds the polygonal facets between
-    # offset samples so the filled edge reads smooth instead of serrated.
-    return chaikin_smooth(outline)
+    smooth_points.append(points[-1])
+    smooth_pressures.append(pressures[-1])
+    return smooth_points, smooth_pressures
 
 
-def chaikin_smooth(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """One pass of Chaikin corner-cutting on a closed polygon."""
-    m = len(points)
-    if m < 3:
-        return points
-    out: list[tuple[float, float]] = []
-    for i in range(m):
-        p0 = points[i]
-        p1 = points[(i + 1) % m]
-        out.append((0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]))
-        out.append((0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]))
-    return out
+def circle_contour(center: tuple[float, float], radius: float, steps: int = 16) -> list[tuple[float, float]]:
+    return [
+        (
+            center[0] + math.cos(math.tau * index / steps) * radius,
+            center[1] + math.sin(math.tau * index / steps) * radius,
+        )
+        for index in range(steps)
+    ]
+
+
+def capsule_contour(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    r0: float,
+    r1: float,
+    cap_steps: int = 6,
+) -> list[tuple[float, float]]:
+    """生成一段两端半径可变的圆角胶囊轮廓。"""
+    angle = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
+    contour = [
+        (p0[0] + math.cos(angle + math.pi / 2) * r0, p0[1] + math.sin(angle + math.pi / 2) * r0),
+        (p1[0] + math.cos(angle + math.pi / 2) * r1, p1[1] + math.sin(angle + math.pi / 2) * r1),
+    ]
+    for step in range(1, cap_steps + 1):
+        a = angle + math.pi / 2 - math.pi * step / cap_steps
+        contour.append((p1[0] + math.cos(a) * r1, p1[1] + math.sin(a) * r1))
+    contour.append(
+        (p0[0] + math.cos(angle - math.pi / 2) * r0, p0[1] + math.sin(angle - math.pi / 2) * r0)
+    )
+    for step in range(1, cap_steps + 1):
+        a = angle - math.pi / 2 - math.pi * step / cap_steps
+        contour.append((p0[0] + math.cos(a) * r0, p0[1] + math.sin(a) * r0))
+    return contour
+
+
+def stroke_contours(stroke: Stroke) -> list[list[tuple[float, float]]]:
+    """把整笔拆成相互重叠的圆角胶囊，避免闭合轮廓在急转弯处自交。"""
+    points, pressures = clean_stroke_samples(stroke)
+    points, pressures = smooth_stroke_samples(points, pressures)
+    if not points:
+        return []
+    min_radius = max(0.05, stroke.base_width * 0.04)
+    radii = [max(min_radius, stroke_width(stroke, pressure) / 2) for pressure in pressures]
+    if len(points) == 1:
+        return [circle_contour(points[0], radii[0])]
+
+    contours: list[list[tuple[float, float]]] = []
+    for index in range(len(points) - 1):
+        if math.dist(points[index], points[index + 1]) < 1e-6:
+            continue
+        contours.append(capsule_contour(points[index], points[index + 1], radii[index], radii[index + 1]))
+    return contours
 
 
 # --- Background templates (ruled / grid / dot pages) ---------------------
@@ -391,15 +464,18 @@ def svg_document(title: str, page: Page) -> str:
     # Highlighters paint first (bottom layer) so opaque ink sits on top of them.
     ordered = sorted(page.strokes, key=lambda s: 0 if is_highlighter(s) else 1)
     for stroke in ordered:
-        outline = stroke_outline(stroke)
-        if not outline:
+        contours = stroke_contours(stroke)
+        if not contours:
             continue
-        d = f"M {fmt(outline[0][0])} {fmt(outline[0][1])}"
-        for pt in outline[1:]:
-            d += f" L {fmt(pt[0])} {fmt(pt[1])}"
-        d += " Z"
+        subpaths = []
+        for contour in contours:
+            d = f"M {fmt(contour[0][0])} {fmt(contour[0][1])}"
+            for point in contour[1:]:
+                d += f" L {fmt(point[0])} {fmt(point[1])}"
+            subpaths.append(d + " Z")
         paths.append(
-            f'<path d="{d}" fill="{color_hex(stroke.color)}" fill-opacity="{fmt(stroke.opacity)}"/>'
+            f'<path d="{" ".join(subpaths)}" fill="{color_hex(stroke.color)}" '
+            f'fill-opacity="{fmt(stroke.opacity)}"/>'
         )
     images = []
     for image in page.images:
@@ -486,16 +562,18 @@ def pdf_stream(page: Page, pdf_font: dict | None) -> bytes:
                 commands.append(f"<{hex_glyphs}> Tj")
                 commands.append("ET")
     for stroke in sorted(page.strokes, key=lambda s: 0 if is_highlighter(s) else 1):
-        outline = stroke_outline(stroke)
-        if not outline:
+        contours = stroke_contours(stroke)
+        if not contours:
             continue
         r, g, b = (c / 255 for c in stroke.color)
         commands.append(f"{fmt(r)} {fmt(g)} {fmt(b)} rg")
         commands.append(f"/GS{fmt(stroke.opacity).replace('.', '_')} gs")
-        commands.append(f"{fmt(outline[0][0])} {fmt(page.height - outline[0][1])} m")
-        for pt in outline[1:]:
-            commands.append(f"{fmt(pt[0])} {fmt(page.height - pt[1])} l")
-        commands.append("h f")
+        for contour in contours:
+            commands.append(f"{fmt(contour[0][0])} {fmt(page.height - contour[0][1])} m")
+            for point in contour[1:]:
+                commands.append(f"{fmt(point[0])} {fmt(page.height - point[1])} l")
+            commands.append("h")
+        commands.append("f")
     return ("\n".join(commands) + "\n").encode("ascii")
 
 
