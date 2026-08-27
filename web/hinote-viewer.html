@@ -415,7 +415,12 @@ function strokeOutline(stroke) {
     const a = a0 - Math.PI * s / steps;
     outline.push([cx[0] + rad[0] * Math.cos(a), cy[0] + rad[0] * Math.sin(a)]);
   }
-  return chaikinSmooth(outline);
+
+  if (outline.length < 7) {
+    return outline;
+  } else {
+    return chaikinSmooth(outline);
+  }
 }
 
 const isHighlighter = s => s.penType === 5 || s.opacity < 1.0;
