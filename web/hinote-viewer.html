@@ -165,6 +165,26 @@
   .page-card .label .ori { color: var(--accent); font-weight: 600; }
   .page-card .label .sel { display: flex; align-items: center; gap: 6px; }
   .page-card .label .sel input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  /* 图层面板：仅多图层页面渲染，复用主题变量 */
+  .page-card .layers {
+    border-top: 1px solid var(--line); padding: 6px 10px 8px;
+    font-size: 12px; color: var(--muted); cursor: default;
+  }
+  .page-card .layers .layers-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .page-card .layers .layers-head .ltitle { font-weight: 600; color: var(--ink); }
+  .page-card .layers .layers-head .spacer { flex: 1; }
+  .page-card .layers .mini {
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    border-radius: 6px; padding: 1px 7px; font: inherit; font-size: 11px; cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  .page-card .layers .mini:hover { border-color: var(--accent); color: var(--accent); }
+  .page-card .layers .layer-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; }
+  .page-card .layers .layer-row input { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
+  .page-card .layers .layer-row .lname {
+    flex: 1; min-width: 0; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .page-card .layers .layer-row .lcount { color: var(--muted); flex: none; }
   #selectBar { display: none; margin-top: 14px; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
   #selectBar .btn2 { padding: 4px 12px; font-size: 12px; }
 
@@ -357,15 +377,52 @@ function readZip(buf) {
 }
 
 /* ---------- PENCILENGINE 解析 ---------- */
+const PEN_TYPES = [1, 2, 3, 5];
+const validStrokeWidth = v => Number.isFinite(v) && v > 0 && v <= 100;
+
+// 16 字节原始图层 UUID -> 32 位小写十六进制（无连字符）。
+// 全 0 表示内置默认图层，其 layerId 就是字符串 "0"。
+function layerIdFromBytes(bytes, off) {
+  let hex = "", allZero = true;
+  for (let i = 0; i < 16; i++) {
+    const b = bytes[off + i];
+    if (b !== 0) allZero = false;
+    hex += b.toString(16).padStart(2, "0");
+  }
+  return allZero ? "0" : hex;
+}
+
+// 风格记录布局判定：
+//   A = 紧邻点表之前的 60 字节（hinote_1.0.4 / 1.0.5，无图层信息）
+//   B = 52 字节风格记录 + 其前 16 字节图层 UUID（hinote_1.0.6 多图层）
+// 文件头 112 处的 u32 是该文件精确的笔画（点表）数量，用来交叉验证。
+function detectStrokeLayout(bytes, u32, f32, cands) {
+  const hdrCount = bytes.length >= 116 ? u32(112) : 0;
+  let aCount = 0, bCount = 0;
+  for (const cand of cands) {
+    const soA = cand.off - 60, soB = cand.off - 52;
+    if (soA >= 0 && PEN_TYPES.includes(u32(soA + 12)) && validStrokeWidth(f32(soA + 40))) aCount++;
+    if (soB - 16 >= 0 && PEN_TYPES.includes(u32(soB)) && validStrokeWidth(f32(soB + 28))) bCount++;
+  }
+  // hdrCount 不可信（0 或超出文件可能容纳的点表数）时不能作为判据
+  const plausible = hdrCount > 0 && hdrCount <= bytes.length / 40;
+  const aMatch = plausible && aCount === hdrCount;
+  const bMatch = plausible && bCount === hdrCount;
+  if (aMatch !== bMatch) return aMatch ? "A" : "B";
+  // 两者都匹配 / 都不匹配：取有效数更多者；平票时保留旧布局 A（向后兼容）
+  return bCount > aCount ? "B" : "A";
+}
+
 function parsePencilEngine(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const u32 = o => dv.getUint32(o, false);
   const f32 = o => dv.getFloat32(o, false);
   const magic = new TextDecoder().decode(bytes.subarray(0, 12));
   if (magic !== "PENCILENGINE") return [];
-  const strokes = [];
   const finite = v => Number.isFinite(v) && -100000 < v && v < 100000;
 
+  // 第一遍：扫描并校验所有候选点表（几何过滤器与旧实现完全一致）
+  const cands = [];
   for (let off = 60; off < bytes.length - 16; off += 4) {
     const prefix = u32(off), count = u32(off + 4), stride = u32(off + 8), resv = u32(off + 12);
     if (!(prefix === 0 || prefix === 2) || count < 2 || count > 16384 || stride !== POINT_STRIDE || resv !== 0) continue;
@@ -392,35 +449,59 @@ function parsePencilEngine(bytes) {
         if (pressures[i] === 0) pressures[i] = last; else last = pressures[i];
       }
     } else pressures.fill(0.2);
+    cands.push({ off, points, pressures });
+  }
+  if (!cands.length) return [];
 
-    const so = off - 60;
-    let baseWidth = f32(so + 40);
-    if (!Number.isFinite(baseWidth) || baseWidth <= 0 || baseWidth > 100) baseWidth = 4.0;
-    const penType = u32(so + 12);
-    if (![1, 2, 3, 5].includes(penType)) continue;
-    const softness = f32(so + 32);
-    const colorValue = u32(so + 8);
+  // 布局判定后，第二遍按选定布局读取风格记录并生成笔画
+  const layout = detectStrokeLayout(bytes, u32, f32, cands);
+  const strokes = [];
+  for (const cand of cands) {
+    const { off, points, pressures } = cand;
+    let baseWidth, penType, softness, colorValue, comps, rgbOrder, layer;
+    if (layout === "B") {
+      const so = off - 52;
+      baseWidth = f32(so + 28);
+      penType = u32(so);
+      // 新版格式没有 60 字节尾随风格，噪声候选只能用笔型 + 笔宽过滤
+      if (!PEN_TYPES.includes(penType) || !validStrokeWidth(baseWidth)) continue;
+      softness = f32(so + 20);
+      colorValue = u32(so + 4);
+      comps = [f32(so + 8), f32(so + 12), f32(so + 16)];
+      // 1.0.6 的浮点分量同样是 BGR 顺序（与旧版一致）。彩色样本
+      // 多图层测试_202610012341_5867.hinote 里最上面的「红」字存的是
+      // (0.149, 0.251, 0.910)，按 BGR 读才是红色，按 RGB 读会变成蓝色。
+      rgbOrder = false;
+      layer = layerIdFromBytes(bytes, so - 16);
+    } else {
+      const so = off - 60;
+      baseWidth = f32(so + 40);
+      if (!Number.isFinite(baseWidth) || baseWidth <= 0 || baseWidth > 100) baseWidth = 4.0;
+      penType = u32(so + 12);
+      if (!PEN_TYPES.includes(penType)) continue;
+      softness = f32(so + 32);
+      colorValue = u32(so + 8);
+      comps = [f32(so + 20), f32(so + 24), f32(so + 28)];
+      // 颜色浮点分量顺序随版本不同：新版标志为 0x01000000/0x01010000 时
+      // 普通笔/铅笔/毛笔按 RGB 存储；旧版按 BGR 存储（红蓝互换）。
+      const flag = u32(so + 4);
+      rgbOrder = flag === 0x01000000 || flag === 0x01010000;
+      layer = "0";                            // 旧版无图层信息，全部归默认图层
+    }
 
     let color, opacity;
     if (colorValue !== 0 && colorValue !== 0xFFFFFFFF) {
       color = [(colorValue >> 16) & 0xFF, (colorValue >> 8) & 0xFF, colorValue & 0xFF];
       opacity = 1.0;
-    } else {
-      const comps = [f32(so + 20), f32(so + 24), f32(so + 28)];
-      if (comps.every(c => Number.isFinite(c) && 0 <= c && c <= 1) && comps.some(c => c > 0)) {
-        // 颜色浮点分量顺序随版本不同：新版 style+4 标志为 0x01000000/0x01010000 时
-        // 普通笔/铅笔/毛笔按 RGB 存储；旧版按 BGR 存储（红蓝互换）。
-        // 荧光笔 type5 在所有版本里都是 BGR。
-        const flag = u32(so + 4);
-        const isNew = flag === 0x01000000 || flag === 0x01010000;
-        const ordered = (penType === 5 || !isNew) ? [...comps].reverse() : comps;
-        color = ordered.map(c => Math.round(c * 255));
-        if (penType === 5) opacity = (Number.isFinite(softness) && softness > 0 && softness <= 1) ? softness : 0.35;
-        else if (penType === 3 && Number.isFinite(softness) && softness > 0 && softness <= 1) opacity = softness;
-        else opacity = 1.0;
-      } else { color = [0, 0, 0]; opacity = 1.0; }
-    }
-    strokes.push({ points, pressures, baseWidth, color, opacity, penType });
+    } else if (comps.every(c => Number.isFinite(c) && 0 <= c && c <= 1) && comps.some(c => c > 0)) {
+      // 荧光笔 type5 在所有版本里都是 BGR
+      const ordered = (penType === 5 || !rgbOrder) ? [...comps].reverse() : comps;
+      color = ordered.map(c => Math.round(c * 255));
+      if (penType === 5) opacity = (Number.isFinite(softness) && softness > 0 && softness <= 1) ? softness : 0.35;
+      else if (penType === 3 && Number.isFinite(softness) && softness > 0 && softness <= 1) opacity = softness;
+      else opacity = 1.0;
+    } else { color = [0, 0, 0]; opacity = 1.0; }
+    strokes.push({ points, pressures, baseWidth, color, opacity, penType, layer });
   }
   return strokes;
 }
@@ -592,6 +673,25 @@ function contoursPath(contours, flipY = null) {
 const isHighlighter = s => s.penType === 5 || s.opacity < 1.0;
 const colorHex = c => "#" + c.map(v => v.toString(16).padStart(2, "0")).join("");
 
+/* 图层绘制顺序：按 layers（下 -> 上）依次分组，隐藏图层整体跳过；
+   同一图层内仍然是荧光笔先画、不透明笔迹后画，与旧版单图层行为一致。 */
+function strokesInPaintOrder(page) {
+  const layers = page.layers && page.layers.length ? page.layers : null;
+  const byLayer = layers ? layers.map(() => []) : null;
+  const rest = [];
+  for (const s of page.strokes) {
+    const i = s.layerIndex;
+    if (byLayer && Number.isInteger(i) && byLayer[i]) byLayer[i].push(s); else rest.push(s);
+  }
+  const out = [];
+  const append = list => {
+    for (const s of list.slice().sort((a, b) => (isHighlighter(a) ? 0 : 1) - (isHighlighter(b) ? 0 : 1))) out.push(s);
+  };
+  if (byLayer) for (let i = 0; i < layers.length; i++) if (layers[i].visible) append(byLayer[i]);
+  append(rest);
+  return out;
+}
+
 /* ---------- 背景网格 ---------- */
 const GRID_COLOR = "#dddddd";
 const GRID_LINE_WIDTH = 0.8, DOT_RADIUS = 1.3;
@@ -656,7 +756,90 @@ function parseTextElement(el, width, height) {
   };
 }
 
-async function buildPage(pageData, files, bkgMap) {
+/* ---------- 图层元数据（hinote_1.0.6 多图层） ---------- */
+// 笔记/页面 data1 里的图层相关字段都是「JSON 字符串里的 JSON 字符串」（双重编码），
+// 统一用这里的安全解析，任何一层坏掉都不影响旧格式。
+function safeJson(text) {
+  if (typeof text !== "string" || !text) return null;
+  try { return JSON.parse(text); } catch (e) { return null; }
+}
+function jsonArrayOf(text) {
+  const v = typeof text === "string" ? safeJson(text) : text;
+  return Array.isArray(v) ? v : [];
+}
+// canvasLayerList / bindLayerInfos -> { layerId: {name, visible, locked, isDelete} }
+function layerInfosFromList(list) {
+  const map = {};
+  for (const info of list) {
+    if (!info || typeof info !== "object") continue;
+    const id = String(info.layerId ?? "0");
+    map[id] = {
+      id,
+      name: typeof info.name === "string" && info.name ? info.name : "",
+      visible: (info.visibleStatus ?? 1) !== 0,
+      locked: !!info.lockStatus,
+      isDelete: !!info.isDelete,
+    };
+  }
+  return map;
+}
+// 笔记级 data1 -> { order: [layerId...]（下 -> 上）, infos: {...} }
+function parseNoteLayerMeta(noteData1) {
+  const d1 = safeJson(noteData1) || {};
+  const infos = layerInfosFromList(jsonArrayOf(d1.canvasLayerList));
+  const ordered = jsonArrayOf(d1.layerOrderedInfo).map(String);
+  const order = [], seen = new Set();
+  for (const id of ordered) {
+    if (id && !seen.has(id)) { seen.add(id); order.push(id); }
+  }
+  // layerOrderedInfo 缺失/不全时，用 canvasLayerList 的声明顺序补齐
+  for (const id in infos) {
+    if (!seen.has(id)) { seen.add(id); order.push(id); }
+  }
+  return { order, infos };
+}
+// 图层显示名：内置默认图层固定为「默认图层」，其余按最顶层序号回退为「图层 n」
+const defaultLayerName = (id, index) => id === "0" ? "默认图层" : `图层 ${index}`;
+
+// 解析某一页的图层顺序，并把 layerIndex 写回每条笔画。
+// 顺序规则：bindLayerIds（页面绑定，下 -> 上）优先，否则用笔记级 layerOrderedInfo；
+// 笔画里出现但元数据缺失的图层追加到最顶层，保证任何笔画都不会被丢掉。
+function resolvePageLayers(noteMeta, pageData, strokes) {
+  const d1 = safeJson(pageData.data1) || {};
+  const bindIds = jsonArrayOf(d1.bindLayerIds).map(String);
+  const infos = { ...((noteMeta && noteMeta.infos) || {}), ...layerInfosFromList(jsonArrayOf(d1.bindLayerInfos)) };
+  const order = [], seen = new Set();
+  const push = id => { if (id && !seen.has(id)) { seen.add(id); order.push(id); } };
+  if (bindIds.length) {
+    for (const id of bindIds) if (!infos[id] || !infos[id].isDelete) push(id);
+  } else {
+    for (const id of ((noteMeta && noteMeta.order) || [])) if (!infos[id] || !infos[id].isDelete) push(id);
+  }
+  for (const s of strokes) push(s.layer || "0");
+  if (!order.length) push("0");   // 旧格式：只有默认图层
+
+  const layers = order.map((id, index) => {
+    const info = infos[id];
+    return {
+      id,
+      name: (info && info.name) || defaultLayerName(id, index),
+      visible: info ? info.visible : true,
+      locked: info ? info.locked : false,
+      count: 0,
+    };
+  });
+  const layerIndex = {};
+  layers.forEach((l, i) => { layerIndex[l.id] = i; });
+  for (const s of strokes) {
+    const i = layerIndex[s.layer || "0"];
+    s.layerIndex = i;
+    layers[i].count++;
+  }
+  return layers;
+}
+
+// 旧格式（无任何图层元数据）等价于只有默认图层
+async function buildPage(pageData, files, bkgMap, noteLayers) {
   const ratio = pageData.pageRatio || 0.706;
   // 笔迹坐标系水平宽度恒为 1000；横向时 height=1000*ratio（长边水平），
   // 纵向时 height=1000/ratio。横向若取 width=1000/ratio 会让笔迹只占 70%≈2/3。
@@ -723,6 +906,7 @@ async function buildPage(pageData, files, bkgMap) {
     if (new TextDecoder().decode(data.subarray(0, 12)) === "PENCILENGINE")
       strokes.push(...parsePencilEngine(data));
   }
+  const layers = resolvePageLayers(noteLayers, pageData, strokes);
   return {
     name: "page-" + (pageData.pageNumber || 0),
     number: pageData.pageNumber || 0,
@@ -730,7 +914,7 @@ async function buildPage(pageData, files, bkgMap) {
     isLandscape: width > height,
     background: pageColor(pageData.pageColor ?? -1),
     backgroundTemplate: pageData.background || "",
-    strokes, images, texts,
+    strokes, images, texts, layers,
   };
 }
 
@@ -759,7 +943,7 @@ function svgDocument(title, page) {
     }).join("");
     parts.push(`<text xml:space="preserve">${tspans}</text>`);
   }
-  const ordered = page.strokes.slice().sort((a, b) => (isHighlighter(a) ? 0 : 1) - (isHighlighter(b) ? 0 : 1));
+  const ordered = strokesInPaintOrder(page);
   for (const s of ordered) {
     const d = contoursPath(strokeContours(s));
     if (!d) continue;
@@ -980,8 +1164,8 @@ async function buildPdf(pages, onProgress) {
         `${fmt(im.w)} 0 0 ${fmt(im.h)} ${fmt(-im.w / 2)} ${fmt(-im.h / 2)} cm`,
         `/Im${idx} Do`, "Q");
     }
-    // 笔迹（荧光笔先画）
-    const ordered = page.strokes.slice().sort((a, b) => (isHighlighter(a) ? 0 : 1) - (isHighlighter(b) ? 0 : 1));
+    // 笔迹（按图层自下而上；层内荧光笔先画，隐藏图层跳过）
+    const ordered = strokesInPaintOrder(page);
     for (const s of ordered) {
       const contours = strokeContours(s);
       if (!contours.length) continue;
@@ -1108,7 +1292,7 @@ if (systemTheme.addEventListener) {
   });
 }
 
-let PAGES = [], SVG_CACHE = [], ARCHIVE_NAME = "note";
+let PAGES = [], SVG_CACHE = [], ARCHIVE_NAME = "note", OPEN_PAGE = -1;
 
 function setProgress(pct, text) {
   $("progressWrap").style.display = "block";
@@ -1162,14 +1346,18 @@ async function processFile(file) {
     }
     pageDatas.sort((a, b) => (a.pageNumber || 0) - (b.pageNumber || 0));
 
-    // 解析顶层 {noteId}.jhinote 的 attachment[]，建立 bkgAttachmentId -> 背景文件名 映射
+    // 解析顶层 {noteId}.jhinote：笔记级图层元数据（1.0.6）+
+    // attachment[] 建立的 bkgAttachmentId -> 背景文件名 映射
     const bkgMap = {};
+    let noteLayers = null;
     for (const name of names) {
       const full = zipEntries[name].fullName;
       if (full.includes("/") || !full.endsWith(".jhinote") || full === "custom_md.jhinote") continue;
       const raw = await files[name].bytes();
       const obj = JSON.parse(new TextDecoder().decode(await gunzip(raw)));
-      for (const att of ((obj.customNoteContent || {}).attachment || [])) {
+      const noteContent = obj.customNoteContent || {};
+      noteLayers = parseNoteLayerMeta(noteContent.data1);
+      for (const att of (noteContent.attachment || [])) {
         if (att.id && att.filePath) bkgMap[att.id] = (att.filePath || "").split(/[\\/]/).pop();
       }
     }
@@ -1177,7 +1365,7 @@ async function processFile(file) {
     // 逐页构建
     for (let i = 0; i < pageDatas.length; i++) {
       await setProgress(24 + Math.round(20 * (i + 1) / pageDatas.length), `解析页面 ${i + 1}/${pageDatas.length}…`);
-      const page = await buildPage(pageDatas[i], files, bkgMap);
+      const page = await buildPage(pageDatas[i], files, bkgMap, noteLayers);
       if (page.strokes.length || page.images.length || BACKGROUND_GRIDS[page.backgroundTemplate])
         PAGES.push(page);
     }
@@ -1204,19 +1392,71 @@ async function processFile(file) {
   }
 }
 
+const escHtml = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// 图层面板 HTML（下 -> 上，与 layers 数组顺序一致）；单图层返回空串
+function layersPanelHtml(page, i) {
+  if (!page.layers || page.layers.length <= 1) return "";
+  const rows = page.layers.map((l, li) => `<label class="layer-row">
+        <input type="checkbox" class="layer-cb" data-i="${i}" data-layer="${li}"${l.visible ? " checked" : ""}>
+        <span class="lname" title="${escHtml(l.name)}">${escHtml(l.name)}</span>
+        <span class="lcount">${l.count} 笔</span></label>`).join("");
+  return `<div class="layers">
+      <div class="layers-head"><span class="ltitle">图层</span>
+        <span class="lsub">下 → 上</span><span class="spacer"></span>
+        <button type="button" class="mini" data-act="all">全选</button>
+        <button type="button" class="mini" data-act="none">全不选</button></div>
+      ${rows}</div>`;
+}
+
+// 重新生成某一页的 SVG（图层显隐变化后缩略图 / 大图 / 导出都跟着变）
+function refreshPageSvg(i) {
+  SVG_CACHE[i] = svgDocument(`${ARCHIVE_NAME}: ${PAGES[i].name}`, PAGES[i]);
+  const card = document.querySelector(`.page-card[data-i="${i}"]`);
+  if (card) card.querySelector(".thumb").innerHTML = SVG_CACHE[i];
+  if (OPEN_PAGE === i) $("modalBox").innerHTML = SVG_CACHE[i];
+}
+
+function setAllLayers(i, visible) {
+  PAGES[i].layers.forEach(l => { l.visible = visible; });
+  const card = document.querySelector(`.page-card[data-i="${i}"]`);
+  if (card) card.querySelectorAll(".layer-cb").forEach(cb => { cb.checked = visible; });
+  refreshPageSvg(i);
+}
+
 function renderGrid() {
   const grid = $("grid");
   grid.innerHTML = "";
   PAGES.forEach((page, i) => {
     const card = document.createElement("div");
     card.className = "page-card";
+    card.dataset.i = i;
     card.style.setProperty("--ar", `${page.width} / ${page.height}`);
     const ori = page.isLandscape ? '<span class="ori">横向</span>' : "纵向";
     card.innerHTML = `<div class="thumb">${SVG_CACHE[i]}</div>
       <div class="label"><span>第 ${page.number} 页 · ${ori}</span>
-      <span class="sel"><input type="checkbox" class="page-cb" data-i="${i}" checked><span>${page.strokes.length} 笔</span></span></div>`;
+      <span class="sel"><input type="checkbox" class="page-cb" data-i="${i}" checked><span>${page.strokes.length} 笔</span></span></div>${layersPanelHtml(page, i)}`;
     card.querySelector(".page-cb").onchange = updateSelCount;
-    card.onclick = (e) => { if (e.target.type !== "checkbox") { $("modalBox").innerHTML = SVG_CACHE[i]; $("modal").classList.add("open"); } };
+    const panel = card.querySelector(".layers");
+    if (panel) {
+      // 面板内的点击不要冒泡到卡片（否则会打开大图预览）
+      panel.onclick = e => e.stopPropagation();
+      panel.querySelector('[data-act="all"]').onclick = () => setAllLayers(i, true);
+      panel.querySelector('[data-act="none"]').onclick = () => setAllLayers(i, false);
+      panel.querySelectorAll(".layer-cb").forEach(cb => {
+        cb.onchange = () => {
+          PAGES[i].layers[parseInt(cb.dataset.layer)].visible = cb.checked;
+          refreshPageSvg(i);
+        };
+      });
+    }
+    card.onclick = (e) => {
+      if (e.target.type !== "checkbox") {
+        OPEN_PAGE = i;
+        $("modalBox").innerHTML = SVG_CACHE[i];
+        $("modal").classList.add("open");
+      }
+    };
     grid.appendChild(card);
   });
   grid.style.display = "grid";

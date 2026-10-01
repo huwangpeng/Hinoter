@@ -40,6 +40,37 @@ python src/hinote_vector_export.py "笔记.hinote" --ppi 300 --size a4
 pip install fonttools pymupdf
 ```
 
+## 多图层
+
+华为笔记 `hinote_1.0.6` 起支持页面图层。本工具会自动识别，并把图层信息写进 `report.md`：
+
+```powershell
+# 合并导出（默认行为，所有可见图层按自下而上合成）
+python src/hinote_vector_export.py "多图层笔记.hinote"
+
+# 额外按图层各导出一张 SVG 到 svg/layers/
+python src/hinote_vector_export.py "多图层笔记.hinote" --split-layers
+
+# 按图层名或 id 筛选
+python src/hinote_vector_export.py "多图层笔记.hinote" --only-layer "图层 1"
+python src/hinote_vector_export.py "多图层笔记.hinote" --hide-layer 0
+
+# 连笔记里被隐藏的图层一起导出
+python src/hinote_vector_export.py "多图层笔记.hinote" --all-layers
+```
+
+`--hide-layer` / `--only-layer` 都匹配图层名（不分大小写）或 `layerId`，可重复使用。默认会跳过笔记自身标记为隐藏的图层。旧版本笔记没有图层信息，行为与以往完全一致。
+
+笔迹归属靠每个笔画样式记录前的 16 字节图层 UUID 判定，格式细节与判别方法见 [HINOTE_FORMAT.md](docs/HINOTE_FORMAT.md#多图层hinote_106)。
+
+## 测试
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+`tests/test_layers.py` 用内存里合成的最小笔迹文件覆盖图层解析与筛选逻辑；如果本机存在真实样本，会额外做端到端核对，路径也可用 `HINOTE_MULTILAYER_SAMPLE` / `HINOTE_COLOR_SAMPLE` / `HINOTE_ZORDER_SAMPLE` 指定。三项核对分别验证图层划分、浮点颜色的 BGR 顺序，以及上层图层压住下层的绘制顺序。
+
 ## 将 PDF 转换为 .hinote
 
 [src/pdf_to_hinote.py](src/pdf_to_hinote.py) 将 PDF 的每一页原样封装进 `.hinote` 容器。PDF 不经过栅格化，矢量图形、文字与页面尺寸完整保留，导入华为笔记后页面依然清晰，并可直接手写批注。
@@ -61,7 +92,7 @@ python src/pdf_to_hinote.py "资料.pdf" -o "导入用.hinote" --title "项目�
 
 ## 支持范围
 
-常规笔记的主干流程已可用：钢笔与荧光笔笔迹（含可变宽度和透明度）、文本框、图片、横格 / 方格 / 点阵等模板背景、导入的 PDF 或图片页面，横向纵向页面均可处理。常规黑白笔记基本无损导出。
+常规笔记的主干流程已可用：钢笔与荧光笔笔迹（含可变宽度和透明度）、文本框、图片、横格 / 方格 / 点阵等模板背景、导入的 PDF 或图片页面，横向纵向页面均可处理。多图层笔记（`hinote_1.0.6`）也能正确还原：笔画按所属图层分组，图层名称、顺序与可见性都从笔记里读出，可按图层筛选或分层导出。常规黑白笔记基本无损导出。
 
 无边画布目前能力有限。其笔迹采用另一套格式 `PENKITINFENG`：现已能识别画布类型笔记、解析 52 字节的 BSD 文件头与 28 字节的点记录，提取全局坐标、压力、时间戳、颜色和笔宽，并在 [src/hinote_infinite.py](src/hinote_infinite.py) 与 [web/infinite-viewer.html](web/infinite-viewer.html) 中实现实验性预览。但笔画描述中仍有较多保留字段含义未明，现有样本仅覆盖黑色钢笔，因此预览结果适合用于格式核对，尚不能作为完整的导出流程使用。遇到此类数据时主脚本会在 `report.md` 中标记，详细分析见[无界笔记格式分析.md](docs/无界笔记格式分析.md)。
 
@@ -75,7 +106,7 @@ hinoter/
 │   ├── hinote_infinite.py         无边画布解析实验
 │   └── pdf_to_hinote.py           PDF 转有界笔记
 ├── tests/
-│   └── test_pdf_to_hinote.py      PDF 转换与容器校验
+│   └── test_layers.py             多图层解析与筛选测试
 ├── web/
 │   ├── hinote-viewer.html         有界笔记查看器
 │   └── infinite-viewer.html       无边画布查看器

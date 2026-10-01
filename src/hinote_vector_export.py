@@ -15,7 +15,7 @@ import subprocess
 import sys
 import zipfile
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import os
@@ -29,6 +29,15 @@ from hinote_infinite import (
 
 PENCIL_ENGINE = b"PENCILENGINE"
 POINT_STRIDE = 36
+# 每个笔画样式记录的字节数。hinote_1.0.4/1.0.5 为 60 字节，紧贴点表；
+# hinote_1.0.6（多图层）缩短为 52 字节，并在其前面多出 16 字节的图层 UUID。
+STYLE_V105_SIZE = 60
+STYLE_V106_SIZE = 52
+LAYER_UUID_SIZE = 16
+# 内置的「默认图层」在 JSON 里 layerId 就是字符串 "0"，在笔迹文件里是 16 字节全零。
+DEFAULT_LAYER_ID = "0"
+PEN_TYPES = (1, 2, 3, 5)
+HEADER_TABLE_COUNT_OFFSET = 112
 
 
 @dataclass
@@ -39,12 +48,39 @@ class Stroke:
     color: tuple[int, int, int]
     opacity: float
     pen_type: int = 0
+    layer: str = DEFAULT_LAYER_ID
+    layer_index: int = 0
+    layer_visible: bool = True
+
+
+@dataclass
+class Layer:
+    """页面中的一个图层。``Layer`` 在列表中的位置即绘制顺序，0 最先画（最底层）。"""
+    id: str
+    name: str
+    visible: bool = True    # 笔记自身的 visibleStatus
+    locked: bool = False
+    exported: bool = True   # 本次导出是否包含（受 --hide-layer/--only-layer/--all-layers 影响）
 
 
 def is_highlighter(stroke: Stroke) -> bool:
     """Highlighters (pen_type 5) are semi-transparent overlays that must sit
     below opaque ink so handwritten text shows on top of them."""
     return stroke.pen_type == 5 or stroke.opacity < 1.0
+
+
+def normalize_layer_id(value: object) -> str:
+    """图层 id 是 32 位十六进制（无连字符）；内置默认图层统一归一到 "0"。"""
+    text = str(value or "").strip().lower().replace("-", "")
+    if not text or set(text) == {"0"}:
+        return DEFAULT_LAYER_ID
+    return text
+
+
+def layer_id_from_uuid(raw: bytes) -> str:
+    if not raw or raw == b"\x00" * len(raw):
+        return DEFAULT_LAYER_ID
+    return normalize_layer_id(raw.hex())
 
 
 @dataclass
@@ -77,6 +113,9 @@ class Page:
     images: list[ImageElement]
     texts: list[TextElement]
     background_template: str = ""
+    # 页面图层，按绘制顺序排列（0 = 最底层）。旧格式笔记只有隐式的一层。
+    layers: list[Layer] = field(default_factory=list)
+    active_layer: str = DEFAULT_LAYER_ID
 
 
 def finite_coordinate(value: float) -> bool:
@@ -91,76 +130,132 @@ def read_be_float(data: bytes, offset: int) -> float:
     return struct.unpack_from(">f", data, offset)[0]
 
 
-def parse_pencilengine(data: bytes) -> list[Stroke]:
-    """Recover the primary PENCILENGINE stroke chain.
+@dataclass
+class PointTable:
+    """一个点表的位置及其解码后的采样点。"""
+    offset: int
+    points: list[tuple[float, float]]
+    pressures: list[float]
 
-    A bounded-note stroke has a 60-byte style record immediately before a
-    ``[0, point_count, 36, 0]`` point table. The table is followed by 64 bytes
-    of index data, then the next style record. Parsing that chain is essential:
-    scanning every number-shaped table also finds auxiliary geometry and bends
-    handwriting into unrelated paths.
+
+def read_point_table(data: bytes, offset: int, count: int) -> PointTable | None:
+    points: list[tuple[float, float]] = []
+    pressures: list[float] = []
+    for index in range(count):
+        point_offset = offset + 16 + index * POINT_STRIDE
+        x = read_be_float(data, point_offset + 4)
+        y = read_be_float(data, point_offset + 8)
+        pressure = read_be_float(data, point_offset + 16)
+        if not finite_coordinate(x) or not finite_coordinate(y):
+            return None
+        points.append((x, y))
+        pressures.append(pressure if math.isfinite(pressure) and pressure > 0 else 0.0)
+    if len(points) < 2:
+        return None
+    # Reject tables that happen to resemble a header inside metadata.
+    first_x, first_y = points[0]
+    if all(x == first_x and y == first_y for x, y in points):
+        return None
+    if any(pressures):
+        first_pressure = next(pressure for pressure in pressures if pressure > 0)
+        for index, pressure in enumerate(pressures):
+            if pressure == 0:
+                pressures[index] = first_pressure
+            else:
+                first_pressure = pressure
+    else:
+        pressures = [0.2] * len(points)
+    return PointTable(offset, points, pressures)
+
+
+def scan_point_tables(data: bytes) -> list[PointTable]:
+    """扫描全部 ``[prefix, count, 36, 0]`` 点表，与样式布局无关。
+
+    只按表头形状和采样点有效性筛选，样式是否合法留给 read_stroke_style 判断。
     """
-    if not data.startswith(PENCIL_ENGINE):
-        return []
-
-    strokes: list[Stroke] = []
-    for offset in range(60, len(data) - 16, 4):
-        table_prefix = read_be_uint(data, offset)
+    tables: list[PointTable] = []
+    for offset in range(0, len(data) - 16, 4):
+        prefix = read_be_uint(data, offset)
         count = read_be_uint(data, offset + 4)
         stride = read_be_uint(data, offset + 8)
         reserved = read_be_uint(data, offset + 12)
-        points_start = offset + 16
-        points_end = points_start + count * stride
         if not (
-            table_prefix in (0, 2)
+            prefix in (0, 2)
             and 2 <= count <= 16_384
             and stride == POINT_STRIDE
             and reserved == 0
         ):
             continue
-        if points_end > len(data):
+        if offset + 16 + count * stride > len(data):
             continue
+        table = read_point_table(data, offset, count)
+        if table is not None:
+            tables.append(table)
+    return tables
 
-        points: list[tuple[float, float]] = []
-        pressures: list[float] = []
-        for index in range(count):
-            point_offset = points_start + index * stride
-            x = read_be_float(data, point_offset + 4)
-            y = read_be_float(data, point_offset + 8)
-            pressure = read_be_float(data, point_offset + 16)
-            if not finite_coordinate(x) or not finite_coordinate(y):
-                points = []
-                break
-            points.append((x, y))
-            pressures.append(pressure if math.isfinite(pressure) and pressure > 0 else 0.0)
-        if len(points) < 2:
-            continue
 
-        # Reject tables that happen to resemble a header inside metadata.
-        x_span = max(x for x, _ in points) - min(x for x, _ in points)
-        y_span = max(y for _, y in points) - min(y for _, y in points)
-        if x_span == 0 and y_span == 0:
+def detect_style_layout(data: bytes, tables: list[PointTable]) -> int:
+    """判断笔迹文件用的是 60 字节还是 52+16 字节的样式布局。
+
+    文件头偏移 112 处记录了本文件精确的点表数量：只有正确的那套布局才能解出
+    同样多的合法样式。多图层样本中 60 字节布局解出 0 条、52 字节布局解出 16 条，
+    而头部计数正是 16，因此按计数判定比按版本号猜测更可靠。
+    """
+    header_count = (
+        read_be_uint(data, HEADER_TABLE_COUNT_OFFSET)
+        if len(data) >= HEADER_TABLE_COUNT_OFFSET + 4
+        else 0
+    )
+    plausible = 0 < header_count <= len(data) // 40
+    valid = {
+        size: sum(
+            1 for table in tables
+            if read_stroke_style(data, table.offset, size) is not None
+        )
+        for size in (STYLE_V105_SIZE, STYLE_V106_SIZE)
+    }
+    if plausible:
+        # 两套都能解出同样多时优先沿用旧布局，保证 1.0.4/1.0.5 的解析完全不变。
+        for size in (STYLE_V105_SIZE, STYLE_V106_SIZE):
+            if valid[size] == header_count:
+                return size
+    if valid[STYLE_V106_SIZE] > valid[STYLE_V105_SIZE]:
+        return STYLE_V106_SIZE
+    return STYLE_V105_SIZE
+
+
+def parse_pencilengine(data: bytes) -> list[Stroke]:
+    """Recover the PENCILENGINE stroke chain, including each stroke's layer.
+
+    两种磁盘布局共用同一个 ``[0, count, 36, 0]`` 点表头，区别只在紧邻点表之前
+    的样式记录：
+
+    * ``hinote_1.0.4`` / ``1.0.5``：60 字节样式记录，紧贴点表；
+    * ``hinote_1.0.6``（多图层）：16 字节图层 UUID + 52 字节样式记录，共 68 字节。
+
+    逐字节扫描 + 样式校验是必要的：辅助几何数据同样长得像点表，直接当笔画会
+    把手写内容拉成互不相干的路径。
+    """
+    if not data.startswith(PENCIL_ENGINE):
+        return []
+
+    tables = scan_point_tables(data)
+    if not tables:
+        return []
+    layout = detect_style_layout(data, tables)
+
+    strokes: list[Stroke] = []
+    for table in tables:
+        style = read_stroke_style(data, table.offset, layout)
+        if style is None:
             continue
-        if any(pressures):
-            first_pressure = next(pressure for pressure in pressures if pressure > 0)
-            for index, pressure in enumerate(pressures):
-                if pressure == 0:
-                    pressures[index] = first_pressure
-                else:
-                    first_pressure = pressure
-        else:
-            pressures = [0.2] * len(points)
-        style_offset = offset - 60
-        base_width = read_be_float(data, style_offset + 40)
-        if not math.isfinite(base_width) or not 0 < base_width <= 100:
-            base_width = 4.0
-        pen_type = read_be_uint(data, style_offset + 12)
-        if pen_type not in (1, 2, 3, 5):
-            continue
-        softness = read_be_float(data, style_offset + 32)
-        color_value = read_be_uint(data, style_offset + 8)
-        color, opacity = stroke_style(data, style_offset, color_value, pen_type, softness)
-        strokes.append(Stroke(points, pressures, base_width, color, opacity, pen_type))
+        pen_type, color, opacity, base_width, layer_id = style
+        strokes.append(
+            Stroke(
+                table.points, table.pressures, base_width, color, opacity,
+                pen_type, layer_id,
+            )
+        )
     return strokes
 
 
@@ -172,21 +267,64 @@ def stroke_color(value: int) -> tuple[int, int, int]:
     return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
 
 
+def read_stroke_style(
+    data: bytes, table_offset: int, style_size: int,
+) -> tuple[int, tuple[int, int, int], float, float, str] | None:
+    """解码紧贴在点表之前的样式记录。
+
+    返回 ``(pen_type, color, opacity, base_width, layer_id)``；字节不构成一条
+    可用笔画时返回 ``None``。``style_size`` 同时充当布局判别标志：
+    ``STYLE_V106_SIZE`` 表示多图层布局，样式记录前还有 16 字节图层 UUID。
+    """
+    if style_size == STYLE_V106_SIZE:
+        style_offset = table_offset - STYLE_V106_SIZE
+        if style_offset - LAYER_UUID_SIZE < 0:
+            return None
+        layer_id = layer_id_from_uuid(data[style_offset - LAYER_UUID_SIZE:style_offset])
+        pen_type = read_be_uint(data, style_offset)
+        color_value = read_be_uint(data, style_offset + 4)
+        rgb_offset = style_offset + 8
+        softness = read_be_float(data, style_offset + 20)
+        base_width = read_be_float(data, style_offset + 28)
+        # 1.0.6 的浮点颜色分量同样是 BGR 顺序（与旧版一致）。用彩色样本
+        # 多图层测试_202610012341_5867.hinote 核对：最上面的「红」字存的是
+        # (0.149, 0.251, 0.910)，按 BGR 读才是 (232, 64, 38) 的红色；
+        # 按 RGB 读会变成蓝色，与笔记自带的缩略图矛盾。
+        rgb_first = False
+    else:
+        style_offset = table_offset - STYLE_V105_SIZE
+        if style_offset < 0:
+            return None
+        layer_id = DEFAULT_LAYER_ID
+        pen_type = read_be_uint(data, style_offset + 12)
+        color_value = read_be_uint(data, style_offset + 8)
+        rgb_offset = style_offset + 20
+        softness = read_be_float(data, style_offset + 32)
+        base_width = read_be_float(data, style_offset + 40)
+        # 偏移 +4 的标志为 0x01000000/0x01010000 时按 RGB 存储，旧版按 BGR。
+        rgb_first = read_be_uint(data, style_offset + 4) in {0x01000000, 0x01010000}
+    if pen_type not in PEN_TYPES:
+        return None
+    if not math.isfinite(base_width) or not 0 < base_width <= 100:
+        return None
+    color, opacity = stroke_style(
+        data, rgb_offset, color_value, pen_type, softness, rgb_first,
+    )
+    return pen_type, color, opacity, base_width, layer_id
+
+
 def stroke_style(
-    data: bytes, style_offset: int, color_value: int, pen_type: int, softness: float,
+    data: bytes, rgb_offset: int, color_value: int, pen_type: int, softness: float,
+    rgb_first: bool,
 ) -> tuple[tuple[int, int, int], float]:
     if color_value not in {0, 0xFFFFFFFF}:
         return stroke_color(color_value), 1.0
-    components = [read_be_float(data, style_offset + offset) for offset in (20, 24, 28)]
+    components = [read_be_float(data, rgb_offset + offset) for offset in (0, 4, 8)]
     if all(math.isfinite(c) and 0 <= c <= 1 for c in components) and any(components):
         # Color float triple storage order depends on the format version.
-        # The flag at style_offset+4 marks newer files (0x01000000/0x01010000)
-        # where normal pens/pencils/brushes store RGB.  Older files stored BGR,
-        # which makes red and blue channels swap.  Highlighters (pen_type 5) are
-        # always stored as BGR in every observed version.
-        flag = read_be_uint(data, style_offset + 4)
-        is_new = flag in {0x01000000, 0x01010000}
-        if pen_type == 5 or not is_new:
+        # 新版的普通笔/铅笔/毛笔按 RGB 存储，旧版按 BGR（红蓝互换）。
+        # 荧光笔（pen_type 5）在所有观测版本里都按 BGR 存储。
+        if pen_type == 5 or not rgb_first:
             components = list(reversed(components))
         rgb = tuple(round(c * 255) for c in components)
         if pen_type == 5:
@@ -461,9 +599,12 @@ def grid_pdf_commands(spec: dict, width: float, height: float) -> list[str]:
 
 def svg_document(title: str, page: Page) -> str:
     paths = []
-    # Highlighters paint first (bottom layer) so opaque ink sits on top of them.
-    ordered = sorted(page.strokes, key=lambda s: 0 if is_highlighter(s) else 1)
+    # 先按图层绘制顺序（0 = 最底层）分组；同一图层内荧光笔先画，
+    # 不透明笔迹叠在其上，与单图层时的表现一致。
+    ordered = sorted(page.strokes, key=lambda s: (s.layer_index, 0 if is_highlighter(s) else 1))
     for stroke in ordered:
+        if not stroke.layer_visible:
+            continue
         contours = stroke_contours(stroke)
         if not contours:
             continue
@@ -561,7 +702,9 @@ def pdf_stream(page: Page, pdf_font: dict | None) -> bytes:
                 commands.append(f"1 0 0 1 {fmt(text_element.x)} {fmt(pdf_y)} Tm")
                 commands.append(f"<{hex_glyphs}> Tj")
                 commands.append("ET")
-    for stroke in sorted(page.strokes, key=lambda s: 0 if is_highlighter(s) else 1):
+    for stroke in sorted(page.strokes, key=lambda s: (s.layer_index, 0 if is_highlighter(s) else 1)):
+        if not stroke.layer_visible:
+            continue
         contours = stroke_contours(stroke)
         if not contours:
             continue
@@ -997,7 +1140,156 @@ def source_name(path: str) -> str:
     return Path(path.replace("\\", "/")).name
 
 
-def build_page(page_data: dict, files: dict[str, bytes], bkg_map: dict[str, str] | None = None) -> Page:
+def parse_json_field(value: object, fallback: object) -> object:
+    """笔记/页面的 data1..data5 里存的是二次编码的 JSON 字符串。"""
+    if isinstance(value, (list, dict)):
+        return value
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def layer_from_entry(entry: dict) -> Layer | None:
+    if entry.get("isDelete"):
+        return None
+    return Layer(
+        id=normalize_layer_id(entry.get("layerId")),
+        name=str(entry.get("name") or "").strip() or "未命名图层",
+        visible=entry.get("visibleStatus", 1) not in (0, False),
+        locked=entry.get("lockStatus", 0) not in (0, False),
+    )
+
+
+def parse_note_layers(note_content: dict) -> tuple[list[Layer], str]:
+    """从顶层 ``{noteId}.jhinote`` 读出整本笔记的图层定义与绘制顺序。
+
+    ``layerOrderedInfo`` 的下标 0 即最先绘制（最底层）的图层；样本中该顺序
+    为 默认图层 → 图层 1 → 图层 2，与三行手写自上而下的版面一致。
+    """
+    info = parse_json_field(note_content.get("data1"), {})
+    if not isinstance(info, dict):
+        return [], DEFAULT_LAYER_ID
+    by_id: dict[str, Layer] = {}
+    for entry in parse_json_field(info.get("canvasLayerList"), []) or []:
+        if not isinstance(entry, dict):
+            continue
+        layer = layer_from_entry(entry)
+        if layer is not None:
+            by_id[layer.id] = layer
+    ordered: list[Layer] = []
+    seen: set[str] = set()
+    for raw_id in parse_json_field(info.get("layerOrderedInfo"), []) or []:
+        layer_id = normalize_layer_id(raw_id)
+        if layer_id in by_id and layer_id not in seen:
+            ordered.append(by_id[layer_id])
+            seen.add(layer_id)
+    for layer_id, layer in by_id.items():
+        if layer_id not in seen:
+            ordered.append(layer)
+    raw_active = info.get("activeLayerId")
+    active = normalize_layer_id(raw_active) if raw_active else DEFAULT_LAYER_ID
+    return ordered, active
+
+
+def resolve_page_layers(
+    page_data: dict, note_layers: list[Layer],
+) -> list[Layer]:
+    """页面级 ``bindLayerIds`` / ``bindLayerInfos`` 优先，缺失时回落到笔记级定义。"""
+    info = parse_json_field(page_data.get("data1"), {})
+    if not isinstance(info, dict):
+        info = {}
+    by_id = {layer.id: layer for layer in note_layers}
+    for entry in parse_json_field(info.get("bindLayerInfos"), []) or []:
+        if not isinstance(entry, dict):
+            continue
+        layer = layer_from_entry(entry)
+        if layer is not None:
+            by_id[layer.id] = layer
+    bind_ids = [
+        normalize_layer_id(value)
+        for value in (parse_json_field(info.get("bindLayerIds"), []) or [])
+    ]
+    source = bind_ids or [layer.id for layer in note_layers]
+    ordered: list[Layer] = []
+    seen: set[str] = set()
+    for layer_id in source:
+        if layer_id in seen:
+            continue
+        ordered.append(by_id.get(layer_id) or Layer(layer_id, f"图层 {len(ordered) + 1}"))
+        seen.add(layer_id)
+    return ordered
+
+
+def attach_layers(
+    strokes: list[Stroke], layers: list[Layer], selector=None,
+) -> list[Layer]:
+    """标注每笔所属图层及其绘制次序，并把 ``selector`` 的取舍写回图层可见性。
+
+    笔迹里出现但元数据没声明的图层会被补到最上层，绝不静默丢笔画。被排除的
+    图层仍保留在 ``layers`` 里（``exported=False``），只是渲染时跳过，这样统计
+    和报告依然准确。
+    """
+    if not layers:
+        layers.append(Layer(DEFAULT_LAYER_ID, "默认图层"))
+    if selector is None:
+        # 未显式指定时沿用笔记自身的 visibleStatus。
+        selector = make_layer_selector()
+    for layer in layers:
+        layer.exported = bool(selector(layer))
+    index_by_id = {layer.id: index for index, layer in enumerate(layers)}
+    for stroke in strokes:
+        if stroke.layer not in index_by_id:
+            index_by_id[stroke.layer] = len(layers)
+            layers.append(Layer(stroke.layer, f"图层 {len(layers) + 1}"))
+        stroke.layer_index = index_by_id[stroke.layer]
+        stroke.layer_visible = layers[stroke.layer_index].exported
+    return layers
+
+
+def layer_matches(layer: Layer, values: set[str]) -> bool:
+    return layer.id in values or layer.name.strip().lower() in values
+
+
+def make_layer_selector(
+    hide_layers: tuple[str, ...] = (),
+    only_layers: tuple[str, ...] = (),
+    include_hidden: bool = False,
+):
+    """构造图层筛选器：``--only-layer`` 取交集、``--hide-layer`` 排除。
+
+    名称不分大小写，也可以用图层 id（32 位十六进制或内置的 "0"）。
+    """
+    hide = {value.strip().lower() for value in hide_layers if value.strip()}
+    only = {value.strip().lower() for value in only_layers if value.strip()}
+
+    def selector(layer: Layer) -> bool:
+        if only and not layer_matches(layer, only):
+            return False
+        if hide and layer_matches(layer, hide):
+            return False
+        if not include_hidden and not layer.visible:
+            return False
+        return True
+
+    return selector
+
+
+def safe_filename(value: str) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", value).strip(" .")
+    return cleaned or "layer"
+
+
+def build_page(
+    page_data: dict,
+    files: dict[str, bytes],
+    bkg_map: dict[str, str] | None = None,
+    note_layers: list[Layer] | None = None,
+    note_active: str = DEFAULT_LAYER_ID,
+    layer_selector=None,
+) -> Page:
     ratio = page_data.get("pageRatio") or 0.706
     # 笔迹坐标系的水平宽度恒为 1000；纵向时 height=1000/ratio（高>宽），
     # 横向时 height=1000*ratio（宽>高，长边在水平方向）。
@@ -1099,6 +1391,8 @@ def build_page(page_data: dict, files: dict[str, bytes], bkg_map: dict[str, str]
         data = files.get(source_name(attachment.get("filePath", "")))
         if data and data.startswith(PENCIL_ENGINE):
             strokes.extend(parse_pencilengine(data))
+    layers = resolve_page_layers(page_data, note_layers or [])
+    layers = attach_layers(strokes, layers, layer_selector)
     return Page(
         name=f"page-{page_data.get('pageNumber', 0)}",
         width=width,
@@ -1108,6 +1402,8 @@ def build_page(page_data: dict, files: dict[str, bytes], bkg_map: dict[str, str]
         images=images,
         texts=texts,
         background_template=page_data.get("background", ""),
+        layers=layers,
+        active_layer=note_active,
     )
 
 
@@ -1116,6 +1412,10 @@ def export_archive(
     output_root: Path,
     ppi: float = 0,
     paper: str = "a4",
+    split_layers: bool = False,
+    include_hidden: bool = False,
+    hide_layers: tuple[str, ...] = (),
+    only_layers: tuple[str, ...] = (),
 ) -> Path:
     destination = output_root / archive_path.stem
     raw = destination / "raw"
@@ -1124,6 +1424,9 @@ def export_archive(
     svg_dir.mkdir(parents=True, exist_ok=True)
     pages: list[Page] = []
     unsupported: list[str] = []
+    note_layers: list[Layer] = []
+    note_active = DEFAULT_LAYER_ID
+    selector = make_layer_selector(hide_layers, only_layers, include_hidden)
 
     with zipfile.ZipFile(archive_path) as archive:
         files = {Path(info.filename).name: archive.read(info) for info in archive.infolist() if not info.is_dir()}
@@ -1140,22 +1443,51 @@ def export_archive(
             elif is_penkit_block(data):
                 unsupported.append(f"{name}: PENKITINFENG infinite-canvas block (see hinote_infinite.py)")
             elif "/" not in info.filename and name.endswith(".jhinote") and name != "custom_md.jhinote":
-                # 顶层 {noteId}.jhinote：解析 attachment[] 建立 id -> filePath 映射
+                # 顶层 {noteId}.jhinote：解析 attachment[] 建立 id -> filePath 映射，
+                # 并读取 hinote_1.0.6 的整本笔记图层定义。
                 try:
                     note_obj = decode_jhinote(data)
-                    for att in note_obj.get("customNoteContent", {}).get("attachment", []):
+                    note_content = note_obj.get("customNoteContent", {})
+                    for att in note_content.get("attachment", []):
                         fp = att.get("filePath", "")
                         if fp:
                             bkg_map[att.get("id", "")] = source_name(fp)
+                    note_layers, note_active = parse_note_layers(note_content)
                 except Exception:
                     pass
 
         for data in sorted(page_data, key=lambda item: item.get("pageNumber", 0)):
-            page = build_page(data, files, bkg_map)
+            page = build_page(data, files, bkg_map, note_layers, note_active, selector)
             if page.strokes or page.images or grid_spec(page.background_template):
                 title = f"{archive_path.name}: {page.name}"
                 (svg_dir / f"{page.name}.svg").write_text(svg_document(title, page), encoding="utf-8")
                 pages.append(page)
+
+    if split_layers and pages:
+        layers_dir = svg_dir / "layers"
+        layers_dir.mkdir(parents=True, exist_ok=True)
+        for page in pages:
+            for layer_index, layer in enumerate(page.layers):
+                if not layer.exported:
+                    continue
+                # 按图层导出的 SVG 只含页面背景、网格与该层笔迹；图片/文本框
+                # 在格式里没有图层归属，因此不重复出现在每一层里。
+                subset = Page(
+                    name=page.name,
+                    width=page.width,
+                    height=page.height,
+                    background=page.background,
+                    strokes=[s for s in page.strokes if s.layer_index == layer_index],
+                    images=[],
+                    texts=[],
+                    background_template=page.background_template,
+                    layers=[layer],
+                )
+                if not subset.strokes:
+                    continue
+                filename = f"{page.name}-{safe_filename(layer.name)}.svg"
+                title = f"{archive_path.name}: {page.name} / {layer.name}"
+                (layers_dir / filename).write_text(svg_document(title, subset), encoding="utf-8")
 
     if pages:
         write_pdf(destination / f"{archive_path.stem}.pdf", pages)
@@ -1189,10 +1521,55 @@ def export_archive(
         lines.append(f"- PDF：`{archive_path.stem}.pdf`，{len(pages)} 页")
         if land:
             lines.append(f"- 横向（landscape）页面：{land} · 纵向（portrait）页面：{len(pages) - land}")
+    layer_report = layer_report_lines(pages, note_active, split_layers)
+    if layer_report:
+        lines.extend(["", "## 图层", "", *layer_report])
     if unsupported:
         lines.extend(["", "## 未导出笔迹", "", *[f"- {item}" for item in unsupported]])
     (destination / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return destination
+
+
+def layer_report_lines(pages: list[Page], active_layer: str, split_layers: bool) -> list[str]:
+    """汇总每页图层；单图层且无名字信息的旧笔记不产生这一节。"""
+    if not pages:
+        return []
+    aggregate: dict[str, dict] = {}
+    order: list[str] = []
+    multi = False
+    for page in pages:
+        if len(page.layers) > 1:
+            multi = True
+        counts: dict[str, int] = {}
+        for stroke in page.strokes:
+            counts[stroke.layer] = counts.get(stroke.layer, 0) + 1
+        for layer in page.layers:
+            if layer.id not in aggregate:
+                aggregate[layer.id] = {
+                    "name": layer.name, "visible": layer.visible, "exported": layer.exported,
+                    "strokes": 0,
+                }
+                order.append(layer.id)
+            aggregate[layer.id]["strokes"] += counts.get(layer.id, 0)
+            aggregate[layer.id]["visible"] = aggregate[layer.id]["visible"] and layer.visible
+            aggregate[layer.id]["exported"] = aggregate[layer.id]["exported"] and layer.exported
+    if not multi and len(order) <= 1 and order and order[0] == DEFAULT_LAYER_ID:
+        return []
+    lines = [f"共 {len(order)} 个图层，按「先画底层」的顺序合成：", ""]
+    for layer_id in order:
+        info = aggregate[layer_id]
+        if not info["exported"]:
+            state = "未导出"
+        elif info["visible"]:
+            state = "可见"
+        else:
+            state = "笔记内隐藏，本次仍导出"
+        if layer_id == active_layer:
+            state += " · 当前图层"
+        lines.append(f"- {info['name']}（`{layer_id}`）：{info['strokes']} 笔 · {state}")
+    if split_layers:
+        lines.extend(["", "- 按图层导出：`svg/layers/`（每层一张 SVG，含页面背景与网格）"])
+    return lines
 
 
 PAPER_SIZES = {
@@ -1226,9 +1603,34 @@ def main() -> None:
         "--size", type=str, default="a4",
         help='Paper size: a4/a3/a5/letter/legal or WxH (default a4)',
     )
+    parser.add_argument(
+        "--split-layers", action="store_true",
+        help="Also write one SVG per layer under svg/layers/",
+    )
+    parser.add_argument(
+        "--all-layers", action="store_true",
+        help="Include layers the note marked as hidden (default: skip them)",
+    )
+    parser.add_argument(
+        "--hide-layer", action="append", default=[], metavar="NAME|ID",
+        help="Skip this layer; repeatable, matches the layer name or its id",
+    )
+    parser.add_argument(
+        "--only-layer", action="append", default=[], metavar="NAME|ID",
+        help="Keep only these layers; repeatable, matches the layer name or its id",
+    )
     args = parser.parse_args()
     for archive in args.archives:
-        print(export_archive(archive, args.output, args.ppi, args.size))
+        print(export_archive(
+            archive,
+            args.output,
+            args.ppi,
+            args.size,
+            split_layers=args.split_layers,
+            include_hidden=args.all_layers,
+            hide_layers=tuple(args.hide_layer),
+            only_layers=tuple(args.only_layer),
+        ))
 
 
 if __name__ == "__main__":

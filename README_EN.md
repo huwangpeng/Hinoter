@@ -40,6 +40,37 @@ Two optional dependencies: `fonttools` enables embedding Chinese text in PDFs (u
 pip install fonttools pymupdf
 ```
 
+## Layers
+
+Huawei Notes supports page layers from `hinote_1.0.6` onward. The tools detect them automatically and record the layer list in `report.md`:
+
+```powershell
+# merged export (the default: every visible layer, bottom-up)
+python src/hinote_vector_export.py "笔记.hinote"
+
+# also write one SVG per layer into svg/layers/
+python src/hinote_vector_export.py "笔记.hinote" --split-layers
+
+# pick layers by name or id
+python src/hinote_vector_export.py "笔记.hinote" --only-layer "图层 1"
+python src/hinote_vector_export.py "笔记.hinote" --hide-layer 0
+
+# include layers the note itself marked hidden
+python src/hinote_vector_export.py "笔记.hinote" --all-layers
+```
+
+`--hide-layer` and `--only-layer` both match the layer name (case-insensitive) or its `layerId`, and may be repeated. Layers the note marked hidden are skipped unless `--all-layers` is given. Older notes carry no layer information and behave exactly as before.
+
+Stroke ownership is determined by the 16-byte layer UUID that precedes each stroke's style record; see [HINOTE_FORMAT.md](docs/HINOTE_FORMAT.md) for the byte-level details.
+
+## Tests
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+`tests/test_layers.py` builds minimal stroke files in memory to cover layer parsing and filtering; when real samples are present it additionally runs end-to-end checks against them (paths can also be given via `HINOTE_MULTILAYER_SAMPLE` / `HINOTE_COLOR_SAMPLE` / `HINOTE_ZORDER_SAMPLE`). The three checks cover layer assignment, the BGR order of float colour components, and an upper layer painting over a lower one.
+
 ## Converting PDFs to .hinote
 
 [src/pdf_to_hinote.py](src/pdf_to_hinote.py) wraps each PDF page into a `.hinote` container unchanged. The PDF is not rasterized: vector graphics, text, and page dimensions are preserved, so pages stay crisp after import and remain annotatable.
@@ -61,7 +92,7 @@ Two caveats: the original PDF content is preserved rather than disguised as edit
 
 ## What's covered
 
-The main pipeline for regular notes works end to end: pen and highlighter strokes (including variable width and opacity), text boxes, images, ruled / grid / dot-grid templates, imported PDF or image backgrounds, portrait and landscape pages. Plain black-ink notes export essentially losslessly.
+The main pipeline for regular notes works end to end: pen and highlighter strokes (including variable width and opacity), text boxes, images, ruled / grid / dot-grid templates, imported PDF or image backgrounds, portrait and landscape pages. Multi-layer notes (`hinote_1.0.6`) are reconstructed correctly too: strokes are grouped by the layer they belong to, and layer names, order, and visibility are read from the note, so you can filter by layer or export layers separately. Plain black-ink notes export essentially losslessly.
 
 The infinite canvas is far less complete. Its strokes use a separate format, `PENKITINFENG`: canvas notebooks can already be identified, the 52-byte BSD file header and 28-byte point records decoded, and coordinates, pressure, timestamps, color, and pen width recovered, with an experimental preview in [src/hinote_infinite.py](src/hinote_infinite.py) and [web/infinite-viewer.html](web/infinite-viewer.html). However, many reserved fields in stroke descriptions remain unexplained, and available samples only cover the black pen — treat the preview as format verification rather than a working exporter. When the main script encounters such data it flags it in `report.md`; details in [docs/无界笔记格式分析.md](docs/无界笔记格式分析.md).
 
@@ -75,7 +106,7 @@ hinoter/
 │   ├── hinote_infinite.py         infinite-canvas parsing experiments
 │   └── pdf_to_hinote.py           PDF → bounded note
 ├── tests/
-│   └── test_pdf_to_hinote.py      conversion & container checks
+│   └── test_layers.py             multi-layer parsing & filtering tests
 ├── web/
 │   ├── hinote-viewer.html         bounded-note viewer
 │   └── infinite-viewer.html       infinite-canvas viewer
