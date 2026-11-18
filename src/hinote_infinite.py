@@ -241,14 +241,56 @@ def parse_thumbnail_area(data1: str) -> dict[str, float]:
 
 # --- Stroke decoding ----------------------------------------------------
 
+PENKIT_DESCRIPTOR_SIZE = 48
+PENKIT_STYLE_SIZES = (20, 16)
+"""Style record sizes: 20 bytes from ``infinite_1.0.2`` on (an extra float,
+observed as 1.0), 16 bytes in the earliest samples.  Detected per block."""
+
+
+def _walk_penkit_strokes(data: bytes, count: int, style_size: int) -> int | None:
+    """Return the end offset if ``count`` strokes parse cleanly, else ``None``."""
+    offset = PENKIT_HEADER_SIZE
+    for _ in range(count):
+        table_at = offset + PENKIT_DESCRIPTOR_SIZE
+        style_at = table_at + 8 + 32 + 1
+        if style_at + style_size > len(data):
+            return None
+        n, stride = struct.unpack_from(">II", data, table_at)
+        end = style_at + style_size + n * PENKIT_POINT_STRIDE
+        if (stride != PENKIT_POINT_STRIDE
+                or struct.unpack_from(">I", data, offset + 12)[0] != n * stride
+                or struct.unpack_from(">I", data, table_at + 36)[0] != 0xFFFFFFFF
+                or data[style_at - 1] != 1
+                or end > len(data)):
+            return None
+        offset = end
+    return offset
+
+
+def penkit_color(value: int) -> tuple[tuple[int, int, int], float]:
+    """Stroke colours are stored as ``0xAABBGGRR``.
+
+    Confirmed against the app-rendered thumbnail: ``0xFF0000FF`` is drawn red
+    and ``0xFFF7590A`` is the HarmonyOS blue ``#0A59F7``.
+    """
+    return (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF), ((value >> 24) & 0xFF) / 255.0
+
+
 def decode_penkit_strokes(data: bytes) -> list[dict]:
     """Extract strokes from a raw PENKITINFENG block.
 
-    Point-table headers are big-endian and may start at any byte offset.  Each
-    table is ``[point_count, 28, 0]``, followed by a 28-byte bounds record,
-    ``point_count`` point records, then 65 bytes whose meaning is still under
-    investigation.  That 65-byte payload is why scanning on four-byte
-    boundaries misses most strokes.
+    Every stroke is laid out sequentially (big-endian)::
+
+        48 bytes   descriptor (+12: point_count * 28)
+         8 bytes   point_count, 28
+        32 bytes   2 x f32, bbox (4 x f32), sequence, 0xFFFFFFFF
+         1 byte    0x01
+        16/20      style: pen_type, base_width (f32), color (ABGR), opacity (f32) [, f32]
+        n x 28     points: x, y (f32), elapsed_ms (u32), pressure (f32), f32, 0, 0
+
+    The two leading metadata floats are usually ``0`` and ``count - 1`` but
+    hold other values on very short strokes (dots), so they are not used for
+    validation.  The block may end with zero padding.
     """
     if len(data) < PENKIT_HEADER_SIZE or not is_penkit_block(data):
         return []
@@ -257,79 +299,99 @@ def decode_penkit_strokes(data: bytes) -> list[dict]:
     if header is None or header.block_type != 1:
         return []
 
-    descriptor_size = 48
-    table_header_size = 12
-    bounds_record_size = PENKIT_POINT_STRIDE
-    point_prefix_size = 1
-    trailing_payload_size = 16
+    for style_size in PENKIT_STYLE_SIZES:
+        end = _walk_penkit_strokes(data, header.stroke_count, style_size)
+        if end is not None and not any(data[end:]):
+            break
+    else:
+        return []
+
     strokes: list[dict] = []
     offset = PENKIT_HEADER_SIZE
     for stroke_index in range(header.stroke_count):
         descriptor_at = offset
-        table_at = descriptor_at + descriptor_size
-        if table_at + table_header_size + bounds_record_size > len(data):
-            break
-
-        count, stride, reserved = struct.unpack_from(">III", data, table_at)
-        point_data = table_at + table_header_size + bounds_record_size + point_prefix_size
-        table_end = point_data + count * PENKIT_POINT_STRIDE + trailing_payload_size
-        valid_header = (
-            2 <= count <= 16384
-            and stride == PENKIT_POINT_STRIDE
-            and reserved == 0
-            and struct.unpack_from(">I", data, descriptor_at + 12)[0] == count * stride
-            and table_end <= len(data)
-        )
-        if not valid_header:
-            break
-
-        bounds_at = table_at + table_header_size
-        bbox = struct.unpack_from(">ffff", data, bounds_at + 4)
-        first_record = point_data
-        pen_type = struct.unpack_from(">I", data, first_record)[0]
-        base_width = struct.unpack_from(">f", data, first_record + 4)[0]
-        argb = struct.unpack_from(">I", data, first_record + 8)[0]
-        style_opacity = struct.unpack_from(">f", data, first_record + 12)[0]
-        alpha = ((argb >> 24) & 0xFF) / 255.0
-        color = ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF)
+        table_at = descriptor_at + PENKIT_DESCRIPTOR_SIZE
+        count = struct.unpack_from(">I", data, table_at)[0]
+        bbox = struct.unpack_from(">ffff", data, table_at + 16)
+        style_at = table_at + 8 + 32 + 1
+        pen_type, base_width, color_value, style_opacity = struct.unpack_from(">IfIf", data, style_at)
+        color, alpha = penkit_color(color_value)
+        point_data = style_at + style_size
 
         points: list[tuple[float, float]] = []
         pressures: list[float] = []
         elapsed_ms: list[int] = []
         for index in range(count):
-            record = point_data + index * PENKIT_POINT_STRIDE
-            x, y = struct.unpack_from(">ff", data, record + 16)
+            x, y, elapsed, pressure = struct.unpack_from(
+                ">ffIf", data, point_data + index * PENKIT_POINT_STRIDE)
             if not (math.isfinite(x) and math.isfinite(y)):
                 continue
-            pressure = struct.unpack_from(">f", data, record)[0] if index else 0.5
-            if not (math.isfinite(pressure) and 0.0 <= pressure <= 1.5):
+            if not (math.isfinite(pressure) and 0.0 < pressure <= 1.5):
                 pressure = 0.5
             points.append((x, y))
             pressures.append(pressure)
-            elapsed_ms.append(struct.unpack_from(">I", data, record + 24)[0])
+            elapsed_ms.append(elapsed)
 
-        if len(pressures) > 1:
-            pressures[0] = pressures[1]
-
-        if len(points) >= 2:
+        if points:
             strokes.append({
                 "points": points,
                 "pressures": pressures,
                 "elapsed_ms": elapsed_ms,
                 "bbox": bbox,
                 "color": color,
-                "argb": argb,
+                "argb": color_value,
                 "base_width": base_width,
                 "opacity": alpha * style_opacity,
                 "pen_type": pen_type,
                 "stroke_index": stroke_index,
                 "descriptor_offset": descriptor_at,
                 "table_offset": table_at,
+                "style_size": style_size,
             })
 
-        offset = table_end
+        offset = point_data + count * PENKIT_POINT_STRIDE
 
     return strokes
+
+
+@dataclass
+class PenkitElement:
+    """Canvas geometry of one image or text box, from ``ged_*.bin``.
+
+    ``(x, y)`` is the top-left of the unrotated box in canvas coordinates and
+    ``angle`` is in radians around the box centre (clockwise on screen).
+    Images are displayed at ``width x height``; text boxes at
+    ``width x height x scale``.  ``element_id`` matches ``pageElement.id`` in
+    the page JSON, whose normalised ``positionX/Y`` are viewport-relative and
+    not usable for placement.
+    """
+    kind: int                  # 0x400 image, 0x800 text box
+    width: float
+    height: float
+    scale: float
+    x: float
+    y: float
+    angle: float
+    element_id: str
+
+
+def decode_penkit_elements(data: bytes) -> list[PenkitElement]:
+    """Decode the element records of a GED block (block_type 4)."""
+    if len(data) < 44 or not is_penkit_block(data) or struct.unpack_from(">I", data, 12)[0] != 4:
+        return []
+    count = struct.unpack_from(">I", data, 40)[0]
+    offset = 44
+    elements: list[PenkitElement] = []
+    for _ in range(count):
+        if offset + 12 + 32 + 4 > len(data):
+            break
+        length, kind = struct.unpack_from(">II", data, offset + 4)
+        w, h, scale, x, y, _w0, _h0, angle = struct.unpack_from(">8f", data, offset + 12)
+        id_len = struct.unpack_from(">I", data, offset + 44)[0]
+        element_id = data[offset + 48:offset + 48 + id_len].decode("ascii", "replace")
+        elements.append(PenkitElement(kind, w, h, scale, x, y, angle, element_id))
+        offset += 8 + length
+    return elements
 
 
 # --- Canvas assembly -----------------------------------------------------
