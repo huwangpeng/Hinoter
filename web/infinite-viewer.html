@@ -356,47 +356,59 @@ function decodePenkitStrokes(data) {
   const HEADER = 52;
   const descriptorSize = 48;
   const stride = 28;
-  const trailingPayload = 16;
   const header = parsePenkitHeader(data);
   if (!header || header.blockType !== 1) return strokes;
+
+  // Per stroke: 48-byte descriptor, [count, 28], 32 bytes (2 floats, bbox,
+  // sequence, 0xFFFFFFFF), 0x01, style (16 bytes in early samples, 20 from
+  // infinite_1.0.2 on), then count x 28-byte points [x, y, elapsed, pressure, ...].
+  const walk = styleSize => {
+    let o = HEADER;
+    for (let i = 0; i < header.strokeCount; i++) {
+      const t = o + descriptorSize;
+      const styleAt = t + 41;
+      if (styleAt + styleSize > data.length) return -1;
+      const n = u32(t);
+      const end = styleAt + styleSize + n * stride;
+      if (u32(t + 4) !== stride || u32(o + 12) !== n * stride || u32(t + 36) !== 0xFFFFFFFF ||
+          data[styleAt - 1] !== 1 || end > data.length) return -1;
+      o = end;
+    }
+    for (let i = o; i < data.length; i++) if (data[i] !== 0) return -1;
+    return o;
+  };
+  const styleSize = [20, 16].find(size => walk(size) >= 0);
+  if (styleSize === undefined) return strokes;
   let off = HEADER;
 
   for (let strokeIndex = 0; strokeIndex < header.strokeCount; strokeIndex++) {
-    const descriptorAt = off;
-    const tableAt = descriptorAt + descriptorSize;
-    if (tableAt + 40 > data.length) break;
+    const tableAt = off + descriptorSize;
     const count = u32(tableAt);
-    const tableStride = u32(tableAt + 4);
-    const reserved = u32(tableAt + 8);
-    const boundsAt = tableAt + 12;
-    const pointsAt = boundsAt + stride + 1;
-    const tableEnd = pointsAt + count * stride;
-
-    if (count < 2 || count > 16384 || tableStride !== stride || reserved !== 0 ||
-        u32(descriptorAt + 12) !== count * stride || tableEnd + trailingPayload > data.length) break;
-
-    const bbox = [f32(boundsAt + 4), f32(boundsAt + 8), f32(boundsAt + 12), f32(boundsAt + 16)];
-    const penType = u32(pointsAt);
-    const baseWidth = f32(pointsAt + 4);
-    const argb = u32(pointsAt + 8);
-    const styleOpacity = f32(pointsAt + 12);
-    const color = [(argb >>> 16) & 0xFF, (argb >>> 8) & 0xFF, argb & 0xFF];
-    const opacity = ((argb >>> 24) & 0xFF) / 255 * styleOpacity;
+    const bbox = [f32(tableAt + 16), f32(tableAt + 20), f32(tableAt + 24), f32(tableAt + 28)];
+    const styleAt = tableAt + 41;
+    const penType = u32(styleAt);
+    const baseWidth = f32(styleAt + 4);
+    const abgr = u32(styleAt + 8);
+    const styleOpacity = f32(styleAt + 12);
+    // colours are 0xAABBGGRR (0xFF0000FF renders red in the app)
+    const color = [abgr & 0xFF, (abgr >>> 8) & 0xFF, (abgr >>> 16) & 0xFF];
+    const opacity = ((abgr >>> 24) & 0xFF) / 255 * styleOpacity;
+    const pointsAt = styleAt + styleSize;
     const points = [];
     const pressures = [];
     const elapsedMs = [];
     for (let index = 0; index < count; index++) {
       const record = pointsAt + index * stride;
-      const pressureRaw = index === 0 ? 0.5 : f32(record);
-      const x = f32(record + 16);
-      const y = f32(record + 20);
+      const x = f32(record);
+      const y = f32(record + 4);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const pressure = Number.isFinite(pressureRaw) && pressureRaw >= 0 && pressureRaw <= 1.5 ? pressureRaw : 0.5;
+      const pressureRaw = f32(record + 12);
+      const pressure = Number.isFinite(pressureRaw) && pressureRaw > 0 && pressureRaw <= 1.5 ? pressureRaw : 0.5;
       points.push([x, y]);
       pressures.push(pressure);
-      elapsedMs.push(u32(record + 24));
+      elapsedMs.push(u32(record + 8));
     }
-    if (pressures.length > 1) pressures[0] = pressures[1];
+    const tableEnd = pointsAt + count * stride;
     if (points.length >= 2) {
       strokes.push({
         points,
@@ -411,7 +423,7 @@ function decodePenkitStrokes(data) {
         tableOffset: tableAt,
       });
     }
-    off = tableEnd + trailingPayload;
+    off = tableEnd;
   }
 
   return strokes;
