@@ -1,48 +1,108 @@
-# Hinoter
+<div align="center">
 
-中文 | [English](README_EN.md)
+<img src="docs/images/icon.png" alt="Hinoter" width="112">
 
-一套读写华为笔记 `.hinote` 文件的工具。浏览器中的查看器可以预览笔记并导出为 SVG、PDF 或 PNG；反过来，也可以把普通 PDF 封装成华为笔记可导入的 `.hinote`，导入后仍可继续手写批注。所有解析均在本地完成，笔记不会上传。`.hinote` 为私有格式，本项目基于样本逆向分析实现，过程与结论记录在 [docs/](docs/) 下；无边画布（`PENKITINFENG`）格式仍在解析中，功能尚不完整。
+<h1>Hinoter</h1>
 
-## 网页查看器
+<p>读写华为笔记 <code>.hinote</code> 的小工具：支持浏览器里预览与导出</p>
 
-打开根目录的 [index.html](index.html)，按笔记类型选择查看器：
+[![MIT License](https://img.shields.io/badge/license-MIT-3da639?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)](#命令行参考)
+[![Format](https://img.shields.io/badge/hinote-PENCILENGINE%20%7C%20PENKITINFENG-2563eb?style=flat-square)](#支持范围)
+[![Stars](https://img.shields.io/github/stars/huwangpeng/Hinoter?style=flat-square&color=eab308)](https://github.com/huwangpeng/Hinoter/stargazers)
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
+中文 | [English](README_EN.md) | [日本语](README_JP.md)
+
+</div>
+
+## 这是什么
+
+`.hinote` 是华为笔记 App 的私有格式，本项目将其可以解析为无损的SVG和PDF，并且提供网页查看器和Python命令行版本。
+
+## 目录
+
+- [快速开始](#快速开始)
+- [命令行参考](#命令行参考)
+- [多图层](#多图层)
+- [支持范围](#支持范围)
+- [解析流程](#解析流程)
+- [项目结构](#项目结构)
+- [路线图](#路线图)
+- [许可](#许可)
+
+## 快速开始
+
+| 想做的事 | 入口 | 还要装什么 |
+| --- | --- | --- |
+| 预览笔记，导出 SVG / PDF / PNG | [index.html](index.html) | 无 |
+| 批量导出 | [src/hinote_vector_export.py](src/hinote_vector_export.py) | Python 3.10+ |
+| 导出 PNG | 同上，加 `--ppi` | `cairosvg` |
+| PDF 转成笔记 | [src/pdf_to_hinote.py](src/pdf_to_hinote.py) | `pypdf` |
+
+### 1. 网页查看器
+
+打开根目录的 [index.html](index.html)，按笔记类型选查看器：
 
 - [web/hinote-viewer.html](web/hinote-viewer.html)：常规笔记（`PENCILENGINE`）
 - [web/infinite-viewer.html](web/infinite-viewer.html)：无边画布（`PENKITINFENG`），实验性
 
-将 `.hinote` 文件拖入页面即可。常规查看器支持逐页预览、页面选择以及 SVG / PDF / PNG 导出。唯一的例外是 PDF 背景：pdf.js 从 CDN 加载，其余解析均在本地的浏览器内完成。
-
-## 命令行导出
-
-需要 Python 3.10+。基础的 SVG 与 PDF 导出不依赖第三方库：
+### 2. 命令行导出
 
 ```powershell
 python src/hinote_vector_export.py "笔记.hinote"
 ```
 
-结果默认写入 `out/笔记/`：每页一张 SVG 外加合并后的 PDF，未支持的内容会记录在同目录的 `report.md` 中。也支持一次处理多个文件：
+结果导出到 `out/笔记/`：报告在同目录下 `report.md` 里。 
+
+Hinoter 也可以一次处理多个文件，示例如下：
 
 ```powershell
 python src/hinote_vector_export.py "笔记一.hinote" "笔记二.hinote" -o export
 ```
 
-PNG 导出依赖 CairoSVG：
+### 3. 导出 PNG
 
 ```powershell
 pip install cairosvg
 python src/hinote_vector_export.py "笔记.hinote" --ppi 300 --size a4
 ```
 
-两个可选依赖：安装 `fonttools` 后可在 PDF 中嵌入中文文本（系统同时需要可用的中文字体）；安装 `pymupdf` 后可还原导入的 PDF 背景页。
+可选依赖：  
+嵌入中文文本需要 `fonttools`（系统同时要有可用的中文字体）；  
+还原导入的 PDF 背景页需要 `pymupdf`。
 
 ```powershell
 pip install fonttools pymupdf
 ```
 
+### 4. PDF 转笔记
+
+[src/pdf_to_hinote.py](src/pdf_to_hinote.py) 把 PDF 装进 `.hinote` 容器，类似华为笔记直接导入 PDF 效果
+
+```powershell
+pip install pypdf
+python src/pdf_to_hinote.py "资料.pdf" -o "导入用.hinote" --title "项目资料"
+```
+
+默认输出在 PDF 同目录、同名 `.hinote`；输出已存在时停止，`--force` 才覆盖。
+
+## 命令行参考
+
+| 参数 | 作用 | 默认 |
+| --- | --- | --- |
+| `archives...` | 一个或多个 `.hinote` 文件 | 必填 |
+| `-o, --output` | 输出根目录 | `out` |
+| `--ppi` | 导出 PNG 的像素密度，如 `300` | `0`（不导 PNG） |
+| `--size` | 纸张：`a4` / `a3` / `a5` / `letter` / `legal`，或 `宽x高` | `a4` |
+| `--split-layers` | 额外按图层各导一张 SVG 到 `svg/layers/` | 关 |
+| `--only-layer` | 只导出指定图层，可写图层名或 id，可重复 | 全部 |
+| `--hide-layer` | 排除指定图层，可重复 | 无 |
+| `--all-layers` | 连笔记里标记为隐藏的图层一起导出 | 跳过隐藏图层 |
+
 ## 多图层
 
-华为笔记 `hinote_1.0.6` 起支持页面图层。本工具会自动识别，并把图层信息写进 `report.md`：
+从华为笔记 `hinote_1.0.6` 起有页面图层。本工具会自动识别，并把图层信息写进 `report.md`：
 
 ```powershell
 # 合并导出（默认行为，所有可见图层按自下而上合成）
@@ -59,66 +119,76 @@ python src/hinote_vector_export.py "多图层笔记.hinote" --hide-layer 0
 python src/hinote_vector_export.py "多图层笔记.hinote" --all-layers
 ```
 
-`--hide-layer` / `--only-layer` 都匹配图层名（不分大小写）或 `layerId`，可重复使用。默认会跳过笔记自身标记为隐藏的图层。旧版本笔记没有图层信息，行为与以往完全一致。
+`--hide-layer` / `--only-layer` 都匹配图层名（不分大小写）或 `layerId`，可重复使用。默认跳过笔记自身标记为隐藏的图层；旧版本笔记没有图层信息，行为与以往一致。
 
 笔迹归属靠每个笔画样式记录前的 16 字节图层 UUID 判定，格式细节与判别方法见 [HINOTE_FORMAT.md](docs/HINOTE_FORMAT.md#多图层hinote_106)。
 
-## 测试
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-`tests/test_layers.py` 用内存里合成的最小笔迹文件覆盖图层解析与筛选逻辑；如果本机存在真实样本，会额外做端到端核对，路径也可用 `HINOTE_MULTILAYER_SAMPLE` / `HINOTE_COLOR_SAMPLE` / `HINOTE_ZORDER_SAMPLE` 指定。三项核对分别验证图层划分、浮点颜色的 BGR 顺序，以及上层图层压住下层的绘制顺序。
-
-## 将 PDF 转换为 .hinote
-
-[src/pdf_to_hinote.py](src/pdf_to_hinote.py) 将 PDF 的每一页原样封装进 `.hinote` 容器。PDF 不经过栅格化，矢量图形、文字与页面尺寸完整保留，导入华为笔记后页面依然清晰，并可直接手写批注。
-
-```powershell
-pip install pypdf
-python src/pdf_to_hinote.py "资料.pdf"
-```
-
-默认在 PDF 同目录生成 `资料.hinote`，可用参数指定输出文件与笔记标题：
-
-```powershell
-python src/pdf_to_hinote.py "资料.pdf" -o "导入用.hinote" --title "项目资料"
-```
-
-输出文件已存在时工具会默认停止；确认覆盖时使用 `--force`。
-
-两点说明：这里保留的是 PDF 本身的内容，并非将其伪装为可编辑笔迹，因此在华为笔记中不能当作文字直接修改；此外 `.hinote` 格式来自样本逆向，不同版本的华为笔记 App 可能存在兼容差异，首次使用时建议先导入副本验证效果。
-
 ## 支持范围
 
-常规笔记的主干流程已可用：钢笔与荧光笔笔迹（含可变宽度和透明度）、文本框、图片、横格 / 方格 / 点阵等模板背景、导入的 PDF 或图片页面，横向纵向页面均可处理。多图层笔记（`hinote_1.0.6`）也能正确还原：笔画按所属图层分组，图层名称、顺序与可见性都从笔记里读出，可按图层筛选或分层导出。常规黑白笔记基本无损导出。
+| 内容 | 有界笔记 `PENCILENGINE` | 无边画布 `PENKITINFENG` |
+| --- | :---: | :---: |
+| 钢笔 / 荧光笔（可变宽度、透明度） | ✅ | ⚠️ 试验性 |
+| 文本、图片 | ✅ | ⚠️ 只还原坐标 |
+| 横格 / 方格 / 点阵模板 | ✅ | ❌ |
+| 导入的 PDF / 图片页 | ✅ | ❌ |
+| 多图层（`hinote_1.0.6`） | ✅ | ❌ |
+| 横竖页面混排 | ✅ | ❌ |
+| 命令行导出 | ✅ | ❌ |
 
-无边画布目前能力有限。其笔迹采用另一套格式 `PENKITINFENG`：现已能识别画布类型笔记、解析 52 字节的 BSD 文件头与 28 字节的点记录，提取全局坐标、压力、时间戳、颜色和笔宽，并在 [src/hinote_infinite.py](src/hinote_infinite.py) 与 [web/infinite-viewer.html](web/infinite-viewer.html) 中实现实验性预览。解析器兼容早期样本与 `infinite_1.0.2`（20 字节样式、彩色笔迹，颜色按 ABGR 存储），并能从 `ged_*.bin` 读取图片与文本框的画布坐标；但笔画描述中仍有保留字段含义未明，主导出脚本尚未接入无边画布，预览结果适合用于格式核对。遇到此类数据时主脚本会在 `report.md` 中标记，详细分析见[无界笔记格式分析.md](docs/无界笔记格式分析.md)。
+## 解析流程
+
+```mermaid
+flowchart LR
+  A[".hinote<br/>ZIP 容器"] --> B["*.jhinote<br/>GZIP + JSON"]
+  A --> C["files/*.bin<br/>笔迹 / 图片"]
+  B --> D["页面与图层元数据"]
+  C --> E["PENCILENGINE 解析"]
+  C --> W["PENKITINFENG 解析<br/>实验性"]
+  D --> F["Page 模型"]
+  E --> F
+  W --> F
+  F --> G["SVG"]
+  F --> H["PDF"]
+  G --> I["PNG"]
+```
 
 ## 项目结构
 
 ```text
 hinoter/
-├── index.html                     查看器入口
+├── index.html                      查看器入口
 ├── src/
-│   ├── hinote_vector_export.py    有界笔记导出
-│   ├── hinote_infinite.py         无边画布解析实验
-│   └── pdf_to_hinote.py           PDF 转有界笔记
+│   ├── hinote_vector_export.py     有界笔记导出（SVG / PDF / PNG）
+│   ├── hinote_infinite.py          无边画布解析实验
+│   └── pdf_to_hinote.py            PDF 转有界笔记
 ├── tests/
-│   └── test_layers.py             多图层解析与筛选测试
+│   ├── test_layers.py              图层解析、筛选与端到端导出
+│   └── test_infinite.py            无边画布解析
 ├── web/
-│   ├── hinote-viewer.html         有界笔记查看器
-│   └── infinite-viewer.html       无边画布查看器
-└── docs/
-    ├── HINOTE_FORMAT.md           有界笔记格式记录
-    └── 无界笔记格式分析.md        无边画布格式记录
+│   ├── hinote-viewer.html          有界笔记查看器
+│   └── infinite-viewer.html        无边画布查看器
+├── docs/
+│   ├── HINOTE_FORMAT.md            有界笔记格式记录
+│   ├── 无界笔记格式分析.md           无边画布格式记录
+│   └── images/                     README 截图
+└── sample/                         本地样本，不入库
 ```
+
+## 路线图
+
+- [x] 有界笔记：笔迹、文本、图片、模板、多图层
+- [x] 命令行导出 SVG / PDF / PNG
+- [x] PDF 转 `.hinote`
+- [ ] `PENKITINFENG` 保留字段与笔宽变化
+- [ ] 无边画布接入主导出脚本
+- [ ] 写回：生成带笔迹的 `.hinote`
 
 ## 许可
 
 MIT License，详见 [LICENSE](LICENSE)。
 
-## 感谢
+## 致谢
 
 如果这个项目对你有用，欢迎点个 star。
+
+[![Star History Chart](https://api.star-history.com/svg?repos=huwangpeng/Hinoter&type=Date)](https://star-history.com/#huwangpeng/Hinoter&Date)
