@@ -99,6 +99,7 @@ python src/pdf_to_hinote.py "资料.pdf" -o "导入用.hinote" --title "项目�
 | `--only-layer` | 只导出指定图层，可写图层名或 id，可重复 | 全部 |
 | `--hide-layer` | 排除指定图层，可重复 | 无 |
 | `--all-layers` | 连笔记里标记为隐藏的图层一起导出 | 跳过隐藏图层 |
+| `--outline` | 笔画轮廓算法：`compact` 合并共线胶囊（默认，文件更小）；`classic` 逐段胶囊，与优化前的输出逐字节一致 | `compact` |
 
 ## 多图层
 

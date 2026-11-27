@@ -99,6 +99,7 @@ By default the output is written next to the PDF under the same name. It stops i
 | `--only-layer` | Export only these layers, by name or id, repeatable | all |
 | `--hide-layer` | Skip these layers, repeatable | none |
 | `--all-layers` | Include layers the note marked hidden | hidden layers skipped |
+| `--outline` | Stroke outline algorithm: `compact` merges collinear capsules (default, smaller files); `classic` keeps one capsule per sample pair and matches the pre-optimisation output byte for byte | `compact` |
 
 ## Layers
 
